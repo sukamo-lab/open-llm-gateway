@@ -87,6 +87,8 @@ The Compose volume persists quota history. Put a TLS reverse proxy or cloud load
 - [Feature state update process](docs/FEATURE_STATE_PROCESS.md)
 - [Development and CI verification](docs/DEVELOPMENT.md)
 - [Database migration and rollback operations](docs/DATABASE_MIGRATIONS.md)
+- [Compatibility and deprecation policy](docs/COMPATIBILITY.md)
+- [Release preparation and verification](docs/RELEASING.md)
 - Interactive API reference: `http://localhost:8000/docs`
 
 ## Security
