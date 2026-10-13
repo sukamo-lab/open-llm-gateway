@@ -204,7 +204,20 @@ features:
       - docs/DEVELOPMENT.md
       - pyproject.toml
     notes: CI and direct PostgreSQL coverage are implemented; status remains partial until the hosted Windows/Linux/PostgreSQL/container workflow completes successfully.
-  - {id: DX-RELEASE-001, pillar: dx_deployment, name: Reproducible signed releases and compatibility policy, status: planned, target: v0.6}
+  - id: DX-RELEASE-001
+    pillar: dx_deployment
+    name: Reproducible signed releases and compatibility policy
+    status: partial
+    target: v0.6
+    evidence:
+      - .github/workflows/release.yml
+      - scripts/release_check.py
+      - tests/test_release_check.py
+      - requirements/release.txt
+      - CHANGELOG.md
+      - docs/COMPATIBILITY.md
+      - docs/RELEASING.md
+    notes: Metadata gates, double-build comparison, checksums, provenance, keyless signing, and compatibility policy are implemented; status remains partial until a tagged release workflow completes and its artifacts are independently verified.
   - {id: CFG-RELOAD-001, pillar: dx_deployment, name: Atomic validated hot reload, status: planned, target: v0.8}
   - {id: JOB-ASYNC-001, pillar: dx_deployment, name: Durable asynchronous jobs and signed webhooks, status: planned, target: v1.0}
   - {id: DEPLOY-HELM-001, pillar: dx_deployment, name: Hardened Kubernetes Helm chart, status: planned, target: v1.0}

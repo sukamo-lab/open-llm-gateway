@@ -23,6 +23,14 @@ python -m build
 
 These commands do not require provider credentials and must not call live LLM APIs.
 
+Release metadata is also checked in CI:
+
+```powershell
+python scripts/release_check.py metadata
+```
+
+The command verifies package/runtime/ledger versions, changelog coverage, and feature evidence paths. Tagged builds additionally require an empty Unreleased section. See [Release runbook](RELEASING.md).
+
 ## PostgreSQL integration tests
 
 Start a disposable PostgreSQL instance, set a test-only DSN, and run the integration marker:

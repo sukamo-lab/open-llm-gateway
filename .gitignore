@@ -4,6 +4,7 @@ __pycache__/
 .test-tmp/
 .pip-tmp/
 dist/
+dist-*/
 build/
 *.egg-info/
 *.pyc
