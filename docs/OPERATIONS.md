@@ -25,6 +25,8 @@ With `features.structured_logging`, each request emits one JSON completion event
 
 `llm-gateway --migration-status --output json` reports component schema versions without changing them. `llm-gateway --migrate` applies pending migrations and is suitable for a deployment pre-start job. See [Database migrations](DATABASE_MIGRATIONS.md).
 
+When idempotency is enabled, monitor database growth and choose a TTL appropriate for client retry windows. PostgreSQL coordinates claims across replicas. SQLite is suitable only for a single gateway process. Treat HTTP 409 with `Retry-After` as an in-progress duplicate and retry later using the same key and unchanged body.
+
 ## Production checklist
 
 1. Copy `config.example.yaml` and `.env.example`; keep both real files out of source control.

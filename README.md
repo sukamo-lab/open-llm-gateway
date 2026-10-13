@@ -11,6 +11,7 @@ It has two explicit profiles: a minimal single-user mode and a fully managed mul
 - Strict free-before-paid ordering with optional prohibition of paid fallback.
 - Persistent atomic rolling quotas for requests and tokens.
 - Automatic failover plus per-provider circuit breakers and concurrency limits.
+- Tenant-scoped persistent idempotency keys for safe non-streaming request replay.
 - Client and administrator bearer authentication with environment-based secrets.
 - Multi-tenant consumer-key issuance, revocation, per-tenant quotas, and spend limits.
 - Provider health, usage accounting, request IDs, readiness checks, and Prometheus metrics.

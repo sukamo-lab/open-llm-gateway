@@ -17,6 +17,7 @@ features:
   metrics: false
   circuit_breaker: true
   structured_logging: false
+  idempotency: false
 ```
 
 Single-user defaults require only a provider key, bind to localhost, do not initialize tenant/key infrastructure, and select the no-database `NullQuotaStore` hot path. Provider quotas or accounting can be enabled independently when desired.
@@ -42,6 +43,7 @@ features:
   metrics: true
   circuit_breaker: true
   structured_logging: true
+  idempotency: true
 ```
 
 Multi-user defaults enable tenant identities, expiring consumer keys, tenant/provider limits, accounting, costs, metrics, and circuit breaking. PostgreSQL is recommended for multiple replicas.
@@ -62,6 +64,7 @@ Disabled features are not merely hidden:
 - `cost_tracking: false` avoids price calculations and cost persistence.
 - `circuit_breaker: false` avoids circuit state bookkeeping.
 - `structured_logging: false` removes request correlation and provider log calls from the request path; normal server console logging remains available.
+- `idempotency: false` avoids idempotency-store initialization and all key/fingerprint work. When enabled, non-streaming chat requests may use `Idempotency-Key` for tenant-scoped safe replay.
 - `authentication: false` removes consumer authentication checks, but is accepted only on a localhost bind.
 
 Invalid dependency combinations fail configuration validation: managed keys require authentication and the admin API; tenant quotas require managed keys; cost tracking requires accounting.

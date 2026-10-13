@@ -45,3 +45,17 @@ def test_placeholder_provider_key_is_not_configured():
     })
     assert config.providers[0].api_key() is None
 
+
+def test_idempotency_mode_defaults_and_key_length_validation():
+    provider = {
+        "name": "p", "base_url": "https://example.test/v1", "api_key_value": "key",
+        "models": [{"name": "fast", "upstream_model": "model"}],
+    }
+    assert GatewayConfig.model_validate({"providers": [provider]}).features.idempotency is False
+    assert GatewayConfig.model_validate({"mode": "multi", "providers": [provider]}).features.idempotency is True
+    with pytest.raises(ValidationError):
+        GatewayConfig.model_validate({
+            "idempotency": {"min_key_length": 100, "max_key_length": 20},
+            "providers": [provider],
+        })
+

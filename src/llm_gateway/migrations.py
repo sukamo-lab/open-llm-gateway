@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-LATEST_VERSIONS = {"usage": 1, "identity": 1}
+LATEST_VERSIONS = {"usage": 1, "identity": 1, "idempotency": 1}
 
 
 def _validate_components(components: Iterable[str]) -> tuple[str, ...]:
@@ -78,7 +78,26 @@ def _sqlite_identity_v1(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE consumer_keys ADD COLUMN expires_at REAL")
 
 
-SQLITE_MIGRATIONS = {"usage": {1: _sqlite_usage_v1}, "identity": {1: _sqlite_identity_v1}}
+def _sqlite_idempotency_v1(db: sqlite3.Connection) -> None:
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS idempotency_records (
+        tenant_id TEXT NOT NULL, key_hash TEXT NOT NULL,
+        request_hash TEXT NOT NULL, owner_token TEXT NOT NULL,
+        state TEXT NOT NULL, response_json TEXT,
+        created_at REAL NOT NULL, expires_at REAL NOT NULL,
+        lease_until REAL NOT NULL,
+        PRIMARY KEY(tenant_id, key_hash))"""
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idempotency_expiry ON idempotency_records(expires_at)"
+    )
+
+
+SQLITE_MIGRATIONS = {
+    "usage": {1: _sqlite_usage_v1},
+    "identity": {1: _sqlite_identity_v1},
+    "idempotency": {1: _sqlite_idempotency_v1},
+}
 
 
 def migrate_sqlite(database: str, components: Iterable[str]) -> dict[str, int]:
@@ -203,6 +222,20 @@ async def _postgres_migration(db, component: str, version: int) -> None:
             ALTER TABLE consumer_keys ADD COLUMN IF NOT EXISTS expires_at DOUBLE PRECISION;
             CREATE INDEX IF NOT EXISTS consumer_keys_hash ON consumer_keys(key_hash);
             CREATE INDEX IF NOT EXISTS consumer_keys_tenant ON consumer_keys(tenant_id);"""
+        )
+    elif (component, version) == ("idempotency", 1):
+        await db.execute(
+            """CREATE TABLE IF NOT EXISTS idempotency_records (
+              tenant_id TEXT NOT NULL, key_hash TEXT NOT NULL,
+              request_hash TEXT NOT NULL, owner_token TEXT NOT NULL,
+              state TEXT NOT NULL, response_json TEXT,
+              created_at DOUBLE PRECISION NOT NULL,
+              expires_at DOUBLE PRECISION NOT NULL,
+              lease_until DOUBLE PRECISION NOT NULL,
+              PRIMARY KEY(tenant_id, key_hash)
+            );
+            CREATE INDEX IF NOT EXISTS idempotency_expiry
+              ON idempotency_records(expires_at);"""
         )
     else:
         raise RuntimeError(f"missing PostgreSQL migration {component} version {version}")

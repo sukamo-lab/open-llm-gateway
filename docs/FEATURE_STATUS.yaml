@@ -30,7 +30,19 @@ features:
   - {id: API-MOD-001, pillar: unified_api, name: Moderation API, status: planned, target: v0.8}
   - {id: API-AUDIO-001, pillar: unified_api, name: Audio APIs, status: planned, target: v0.8}
   - {id: API-IMAGE-001, pillar: unified_api, name: Image generation API, status: planned, target: v0.8}
-  - {id: API-IDEMP-001, pillar: unified_api, name: Idempotency keys, status: planned, target: v0.6}
+  - id: API-IDEMP-001
+    pillar: unified_api
+    name: Idempotency keys
+    status: partial
+    target: v0.6
+    evidence:
+      - src/llm_gateway/idempotency.py
+      - src/llm_gateway/app.py
+      - src/llm_gateway/migrations.py
+      - tests/test_idempotency.py
+      - tests/integration/test_postgres.py
+      - docs/CONFIGURATION.md
+    notes: Tenant-scoped persistent replay, conflict detection, concurrent coalescing, and lease recovery are implemented for non-streaming chat; full pytest and live PostgreSQL verification remain pending.
   - {id: API-BATCH-001, pillar: unified_api, name: Batch API, status: planned, target: v1.0, depends_on: [JOB-ASYNC-001]}
   - {id: DISC-MODEL-001, pillar: unified_api, name: Controlled upstream model discovery, status: planned, target: v0.8}
 

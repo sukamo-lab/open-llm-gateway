@@ -101,6 +101,7 @@ class GatewayConfig(StrictModel):
     routing: "RoutingConfig" = Field(default_factory=lambda: RoutingConfig())
     observability: "ObservabilityConfig" = Field(default_factory=lambda: ObservabilityConfig())
     accounting: "AccountingConfig" = Field(default_factory=lambda: AccountingConfig())
+    idempotency: "IdempotencyConfig" = Field(default_factory=lambda: IdempotencyConfig())
     features: "FeatureConfig" = Field(default_factory=lambda: FeatureConfig())
     providers: list[ProviderConfig]
 
@@ -117,12 +118,14 @@ class GatewayConfig(StrictModel):
                 "tenant_quotas": False, "provider_quotas": False,
                 "usage_accounting": False, "cost_tracking": False,
                 "metrics": False, "circuit_breaker": True, "structured_logging": False,
+                "idempotency": False,
             },
             "multi": {
                 "authentication": True, "admin_api": True, "managed_keys": True,
                 "tenant_quotas": True, "provider_quotas": True,
                 "usage_accounting": True, "cost_tracking": True,
                 "metrics": True, "circuit_breaker": True, "structured_logging": True,
+                "idempotency": True,
             },
         }[self.mode]
         for name, default in defaults.items():
@@ -243,6 +246,22 @@ class AccountingConfig(StrictModel):
     retention_days: int = Field(default=90, ge=30)
 
 
+class IdempotencyConfig(StrictModel):
+    ttl_seconds: int = Field(default=86400, ge=60, le=604800)
+    lease_seconds: int = Field(default=180, ge=5, le=3600)
+    wait_timeout_seconds: float = Field(default=30, ge=0, le=300)
+    poll_interval_seconds: float = Field(default=0.1, gt=0, le=5)
+    max_response_bytes: int = Field(default=10_485_760, ge=1024, le=67_108_864)
+    min_key_length: int = Field(default=8, ge=1, le=128)
+    max_key_length: int = Field(default=255, ge=8, le=1024)
+
+    @model_validator(mode="after")
+    def valid_key_lengths(self) -> "IdempotencyConfig":
+        if self.max_key_length < self.min_key_length:
+            raise ValueError("max_key_length must be at least min_key_length")
+        return self
+
+
 class FeatureConfig(StrictModel):
     authentication: bool | None = None
     admin_api: bool | None = None
@@ -254,6 +273,7 @@ class FeatureConfig(StrictModel):
     metrics: bool | None = None
     circuit_breaker: bool | None = None
     structured_logging: bool | None = None
+    idempotency: bool | None = None
 
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")

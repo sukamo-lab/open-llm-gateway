@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
+import json
 import secrets
 import hashlib
 import logging
@@ -126,12 +128,27 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             ) if identity_enabled else None
         )
     metrics = Metrics() if config.features.metrics else NullMetrics()
+    idempotency_store = None
+    if config.features.idempotency:
+        from .idempotency import PostgresIdempotencyStore, SQLiteIdempotencyStore
+
+        store_type = (
+            PostgresIdempotencyStore
+            if config.database.startswith(("postgresql://", "postgres://"))
+            else SQLiteIdempotencyStore
+        )
+        idempotency_store = store_type(
+            config.database, config.idempotency.ttl_seconds,
+            config.idempotency.lease_seconds,
+        )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await quota.initialize()
         if identities is not None and identities is not quota:
             await identities.initialize()
+        if idempotency_store is not None:
+            await idempotency_store.initialize()
         removed = await quota.cleanup(
             time.time() - config.accounting.retention_days * 86400
         )
@@ -148,6 +165,8 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         close = getattr(shared_store or quota, "close", None)
         if close:
             await close()
+        if idempotency_store is not None:
+            await idempotency_store.close()
 
     app = FastAPI(
         title="LLM Gateway", version=__version__, lifespan=lifespan,
@@ -379,9 +398,19 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             raise HTTPException(400, "request body must contain valid JSON") from exc
         if not isinstance(payload, dict):
             raise HTTPException(400, "request body must be a JSON object")
+        idempotency_key = request.headers.get("idempotency-key")
+        if idempotency_key and not config.features.idempotency:
+            raise HTTPException(400, "idempotency is not enabled")
+        if idempotency_key and not (
+            config.idempotency.min_key_length <= len(idempotency_key) <= config.idempotency.max_key_length
+            and all(33 <= ord(character) <= 126 for character in idempotency_key)
+        ):
+            raise HTTPException(400, "invalid Idempotency-Key")
         router: GatewayRouter = request.app.state.router
         tenant_limits = context.limits if config.features.tenant_quotas else ()
         if payload.get("stream"):
+            if idempotency_key:
+                raise HTTPException(400, "Idempotency-Key is not supported for streaming requests")
             iterator = router.stream(payload, context.tenant_id, tenant_limits)
             try:
                 first = await anext(iterator)
@@ -399,16 +428,66 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                     yield chunk
 
             return StreamingResponse(replay(), media_type="text/event-stream")
+        idempotency_digest = None
+        owner_token = None
+        if idempotency_key and idempotency_store is not None:
+            from .idempotency import key_hash, request_hash
+
+            idempotency_digest = key_hash(idempotency_key)
+            fingerprint = request_hash(payload)
+            wait_deadline = time.monotonic() + config.idempotency.wait_timeout_seconds
+            while True:
+                claim = await idempotency_store.claim(
+                    context.tenant_id, idempotency_digest, fingerprint
+                )
+                if claim.status == "conflict":
+                    raise HTTPException(409, "Idempotency-Key was already used with a different request")
+                if claim.status == "cached":
+                    return JSONResponse(
+                        content=claim.response,
+                        headers={"Idempotent-Replayed": "true"},
+                    )
+                if claim.status == "owner":
+                    owner_token = claim.owner_token
+                    break
+                if time.monotonic() >= wait_deadline:
+                    raise HTTPException(
+                        409, "request with this Idempotency-Key is still in progress",
+                        headers={"Retry-After": "1"},
+                    )
+                await asyncio.sleep(config.idempotency.poll_interval_seconds)
         try:
             body, provider, upstream_model = await router.complete_for(
                 payload, context.tenant_id, tenant_limits
             )
         except QuotaExceeded as exc:
+            if owner_token and idempotency_digest:
+                await idempotency_store.release(context.tenant_id, idempotency_digest, owner_token)
             raise HTTPException(status_code=429, detail=str(exc)) from exc
         except NoModelAvailable as exc:
+            if owner_token and idempotency_digest:
+                await idempotency_store.release(context.tenant_id, idempotency_digest, owner_token)
             raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception:
+            if owner_token and idempotency_digest:
+                await idempotency_store.release(context.tenant_id, idempotency_digest, owner_token)
+            raise
         meta = body.pop("_gateway_meta", {})
-        return {**body, "gateway": {"provider": provider, "upstream_model": upstream_model, **meta}}
+        result = {**body, "gateway": {"provider": provider, "upstream_model": upstream_model, **meta}}
+        if owner_token and idempotency_digest:
+            encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+            if len(encoded.encode("utf-8")) <= config.idempotency.max_response_bytes:
+                stored = await idempotency_store.complete(
+                    context.tenant_id, idempotency_digest, owner_token, encoded
+                )
+            else:
+                await idempotency_store.release(context.tenant_id, idempotency_digest, owner_token)
+                stored = False
+            return JSONResponse(
+                content=result,
+                headers={"Idempotent-Replayed": "false", "Idempotency-Stored": str(stored).lower()},
+            )
+        return result
 
     disabled_paths: set[str] = set()
     if not config.features.admin_api:
