@@ -38,6 +38,7 @@ async def test_postgres_quota_reservation_reconciliation_and_snapshot():
     suffix = uuid.uuid4().hex
     configured_provider = provider(f"provider-{suffix}")
     try:
+        assert (await store.migration_status())["usage"] == 1
         first = await store.reserve(configured_provider, f"request-{suffix}-1", 8)
         assert first is not None
         assert await store.reserve(configured_provider, f"request-{suffix}-2", 1) is None
@@ -62,6 +63,7 @@ async def test_postgres_tenant_key_lifecycle_and_limits():
     await store.initialize()
     suffix = uuid.uuid4().hex
     try:
+        assert await store.migration_status() == {"usage": 1, "identity": 1}
         tenant = await store.create_tenant(f"tenant-{suffix}", requests_per_minute=3)
         issued = await store.issue_key(tenant["id"], "integration-key", expires_in_days=1)
 

@@ -52,3 +52,5 @@ CI jobs receive read-only repository permissions. No provider secrets are needed
 - External-service tests belong in `tests/integration/` and use the `integration` marker.
 - Live provider tests must be opt-in, must never print credentials or model content, and must not be part of the default CI path.
 - Every configurable feature needs tests for both enabled and disabled behavior.
+
+Database changes must be expressed as numbered component migrations in `migrations.py`, include legacy-data preservation tests, and update [Database migrations](DATABASE_MIGRATIONS.md). Never edit an already released migration; add the next version.
