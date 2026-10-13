@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import random
 import uuid
 import asyncio
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from typing import Any, AsyncIterator
 
 import httpx
@@ -15,6 +18,7 @@ from .metrics import Metrics
 
 
 FAILOVER_STATUS = {401, 403, 404, 408, 409, 425, 429, 500, 502, 503, 504}
+RETRY_STATUS = {408, 425, 429, 500, 502, 503, 504}
 
 
 class NoModelAvailable(RuntimeError):
@@ -185,7 +189,7 @@ class GatewayRouter:
                 continue
             try:
                 async with self._semaphores[candidate.provider.name]:
-                    response = await self._post(candidate, payload, stream=False)
+                    response, upstream_attempts = await self._post_with_retries(candidate, payload)
             except httpx.HTTPError as exc:
                 await self.quota.reconcile(reservation, None, False)
                 await self._failed(candidate.provider)
@@ -237,6 +241,7 @@ class GatewayRouter:
             await self._succeeded(candidate.provider)
             body["model"] = candidate.model.name
             body["_gateway_meta"] = {
+                "upstream_attempts": upstream_attempts,
                 "rate_limits": {
                     key: value for key, value in response.headers.items()
                     if key.lower().startswith(("x-ratelimit", "ratelimit"))
@@ -308,6 +313,69 @@ class GatewayRouter:
             json=self._upstream_payload(candidate, payload, stream),
             timeout=candidate.provider.timeout_seconds,
         )
+
+    async def _post_with_retries(
+        self, candidate: Candidate, payload: dict[str, Any]
+    ) -> tuple[httpx.Response, int]:
+        routing = self.config.routing
+        started = time.monotonic()
+        deadline = started + routing.request_deadline_seconds if routing.request_deadline_seconds else None
+        last_error: httpx.HTTPError | None = None
+        for attempt in range(1, routing.retry_attempts + 1):
+            remaining = deadline - time.monotonic() if deadline else None
+            if remaining is not None and remaining <= 0:
+                break
+            timeout = min(candidate.provider.timeout_seconds, remaining) if remaining is not None else candidate.provider.timeout_seconds
+            try:
+                response = await self.client.post(
+                    self._url(candidate.provider),
+                    headers=self._headers(candidate.provider),
+                    json=self._upstream_payload(candidate, payload, False),
+                    timeout=timeout,
+                )
+                if response.status_code not in RETRY_STATUS or attempt == routing.retry_attempts:
+                    return response, attempt
+                delay = self._retry_delay(response, attempt)
+            except httpx.HTTPError as exc:
+                last_error = exc
+                if attempt == routing.retry_attempts:
+                    raise
+                delay = self._retry_delay(None, attempt)
+            if deadline is not None and time.monotonic() + delay >= deadline:
+                break
+            if delay:
+                await asyncio.sleep(delay)
+        if last_error is not None:
+            raise last_error
+        raise httpx.TimeoutException("gateway request deadline exhausted before another retry")
+
+    def _retry_delay(self, response: httpx.Response | None, attempt: int) -> float:
+        routing = self.config.routing
+        retry_after = self._retry_after_seconds(response) if response is not None else None
+        if retry_after is not None:
+            return min(retry_after, routing.retry_max_backoff_seconds)
+        base = min(
+            routing.retry_initial_backoff_seconds * (2 ** (attempt - 1)),
+            routing.retry_max_backoff_seconds,
+        )
+        spread = base * routing.retry_jitter_ratio
+        return max(0, random.uniform(base - spread, base + spread))
+
+    @staticmethod
+    def _retry_after_seconds(response: httpx.Response) -> float | None:
+        value = response.headers.get("retry-after")
+        if not value:
+            return None
+        try:
+            return max(0, float(value))
+        except ValueError:
+            try:
+                parsed = parsedate_to_datetime(value)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return max(0, (parsed - datetime.now(timezone.utc)).total_seconds())
+            except (TypeError, ValueError, OverflowError):
+                return None
 
     @staticmethod
     def _url(provider: ProviderConfig) -> str:

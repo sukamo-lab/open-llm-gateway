@@ -218,6 +218,17 @@ class RoutingConfig(StrictModel):
     http_max_connections: int = Field(default=200, gt=0)
     http_max_keepalive_connections: int = Field(default=50, ge=0)
     http_keepalive_expiry_seconds: float = Field(default=30, gt=0)
+    retry_attempts: int = Field(default=1, ge=1, le=10)
+    retry_initial_backoff_seconds: float = Field(default=0.25, ge=0, le=60)
+    retry_max_backoff_seconds: float = Field(default=8, ge=0, le=300)
+    retry_jitter_ratio: float = Field(default=0.2, ge=0, le=1)
+    request_deadline_seconds: float | None = Field(default=None, gt=0, le=3600)
+
+    @model_validator(mode="after")
+    def valid_retry_backoff(self) -> "RoutingConfig":
+        if self.retry_max_backoff_seconds < self.retry_initial_backoff_seconds:
+            raise ValueError("retry_max_backoff_seconds must be at least retry_initial_backoff_seconds")
+        return self
 
 
 class ObservabilityConfig(StrictModel):

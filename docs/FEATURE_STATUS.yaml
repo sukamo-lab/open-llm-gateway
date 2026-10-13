@@ -62,7 +62,17 @@ features:
     status: implemented
     verified: 2026-10-12
     evidence: [src/llm_gateway/app.py, src/llm_gateway/config.py]
-  - {id: RES-RETRY-001, pillar: resilience, name: Deadline-aware exponential retry with jitter, status: planned, target: v0.6}
+  - id: RES-RETRY-001
+    pillar: resilience
+    name: Deadline-aware exponential retry with jitter
+    status: partial
+    target: v0.6
+    evidence:
+      - src/llm_gateway/router.py
+      - src/llm_gateway/config.py
+      - tests/test_router.py
+      - docs/CONFIGURATION.md
+    notes: Configurable bounded retries, jitter, Retry-After, deadlines, and attempt metadata are implemented for non-streaming calls; streaming retry parity and executable test-suite verification remain pending.
   - {id: RES-DISTCB-001, pillar: resilience, name: Distributed circuit and concurrency coordination, status: planned, target: v1.0}
   - {id: CACHE-EXACT-001, pillar: resilience, name: Exact tenant-isolated cache, status: planned, target: v0.7}
   - {id: CACHE-SEM-001, pillar: resilience, name: Privacy-aware semantic cache, status: planned, target: v1.0, depends_on: [CACHE-EXACT-001, API-EMBED-001]}
@@ -148,7 +158,18 @@ features:
     status: implemented
     verified: 2026-10-12
     evidence: [Dockerfile, docker-compose.yml, src/llm_gateway/cli.py, src/llm_gateway/admin_cli.py, docs/DEPLOYMENT.md]
-  - {id: DATA-MIG-001, pillar: dx_deployment, name: Versioned database migrations and rollback, status: planned, target: v0.6}
+  - id: DATA-MIG-001
+    pillar: dx_deployment
+    name: Versioned database migrations and rollback
+    status: partial
+    target: v0.6
+    evidence:
+      - src/llm_gateway/migrations.py
+      - src/llm_gateway/cli.py
+      - tests/test_migrations.py
+      - tests/integration/test_postgres.py
+      - docs/DATABASE_MIGRATIONS.md
+    notes: Component migrations, status/upgrade commands, locking, SQLite backups, and rollback runbook are implemented; live PostgreSQL and hosted CI verification remain pending.
   - id: DX-TEST-001
     pillar: dx_deployment
     name: Cross-platform CI and PostgreSQL integration suite

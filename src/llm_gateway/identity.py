@@ -10,6 +10,7 @@ import uuid
 from collections import OrderedDict
 
 from .config import Limit
+from .migrations import migrate_sqlite
 
 
 @dataclass(frozen=True)
@@ -45,32 +46,7 @@ class IdentityStore:
 
     async def initialize(self) -> None:
         async with self._write_lock:
-            with self._connect() as db:
-                db.executescript(
-                    """
-                    CREATE TABLE IF NOT EXISTS tenants (
-                      id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE,
-                      active INTEGER NOT NULL DEFAULT 1,
-                      requests_per_minute INTEGER,
-                      tokens_per_day INTEGER,
-                      cost_per_30_days REAL,
-                      created_at REAL NOT NULL
-                    );
-                    CREATE TABLE IF NOT EXISTS consumer_keys (
-                      id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL,
-                      name TEXT NOT NULL, key_prefix TEXT NOT NULL,
-                      key_hash TEXT NOT NULL UNIQUE,
-                      active INTEGER NOT NULL DEFAULT 1,
-                      created_at REAL NOT NULL, last_used_at REAL, expires_at REAL,
-                      FOREIGN KEY(tenant_id) REFERENCES tenants(id)
-                    );
-                    CREATE INDEX IF NOT EXISTS consumer_keys_hash ON consumer_keys(key_hash);
-                    CREATE INDEX IF NOT EXISTS consumer_keys_tenant ON consumer_keys(tenant_id);
-                    """
-                )
-                columns = {row[1] for row in db.execute("PRAGMA table_info(consumer_keys)")}
-                if "expires_at" not in columns:
-                    db.execute("ALTER TABLE consumer_keys ADD COLUMN expires_at REAL")
+            migrate_sqlite(self.database, ("identity",))
 
     @staticmethod
     def _hash(token: str) -> str:

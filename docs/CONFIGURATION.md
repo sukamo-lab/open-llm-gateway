@@ -24,6 +24,8 @@ When `auth.enabled` is true, `/v1/*` requires a bearer token listed in the comma
 - `paid_fallback`: set false to prohibit paid providers globally.
 - `allow_provider_override`: enables the non-standard request field `provider`; useful for diagnostics but normally false on public deployments.
 - `http_max_connections`, `http_max_keepalive_connections`, and `http_keepalive_expiry_seconds` tune the shared upstream connection pool. Reused TLS connections minimize gateway overhead.
+- `retry_attempts` is the total number of attempts for one provider candidate; `1` disables same-provider retries and preserves immediate failover. Transient transport errors and HTTP 408/425/429/5xx responses use bounded exponential backoff and jitter. `Retry-After` is honored up to `retry_max_backoff_seconds`.
+- `request_deadline_seconds` optionally bounds all non-streaming attempts against one provider. Keep it below the consumer/load-balancer timeout. Streaming retries currently occur through provider failover only before a successful stream is established.
 - Provider `tier` is `free` or `paid`. Free always sorts first.
 - Lower model `priority` sorts first within a tier.
 - `failure_threshold` consecutive errors open that provider's circuit for `cooldown_seconds`.

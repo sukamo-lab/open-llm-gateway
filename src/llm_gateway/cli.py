@@ -13,24 +13,43 @@ from . import __version__
 from .config import load_config
 
 
-async def check_storage(config) -> None:
-    if not any((
-        config.features.provider_quotas, config.features.tenant_quotas,
-        config.features.usage_accounting, config.features.managed_keys,
-    )):
-        return
+def storage_components(config) -> tuple[str, ...]:
+    components = []
+    if any((config.features.provider_quotas, config.features.tenant_quotas,
+            config.features.usage_accounting)):
+        components.append("usage")
+    if config.features.managed_keys:
+        components.append("identity")
+    return tuple(components)
+
+
+async def migration_status(config, upgrade: bool = False) -> dict[str, int]:
+    components = storage_components(config)
+    if not components:
+        return {}
     if config.database.startswith(("postgresql://", "postgres://")):
-        from .postgres import PostgresStore
-        store = PostgresStore(config.database, 0, 0)
-        await store.initialize()
-        await store.close()
-    else:
-        from .identity import IdentityStore
-        from .quota import QuotaStore
-        quota = QuotaStore(config.database)
-        identities = IdentityStore(config.database, 0, 0)
-        await quota.initialize()
-        await identities.initialize()
+        import asyncpg
+
+        from .migrations import migrate_postgres, postgres_status
+
+        pool = await asyncpg.create_pool(config.database, min_size=1, max_size=1, command_timeout=30)
+        try:
+            return (
+                await migrate_postgres(pool, components)
+                if upgrade else await postgres_status(pool, components)
+            )
+        finally:
+            await pool.close()
+    from .migrations import migrate_sqlite, sqlite_status
+
+    return (
+        migrate_sqlite(config.database, components)
+        if upgrade else sqlite_status(config.database, components)
+    )
+
+
+async def check_storage(config) -> None:
+    await migration_status(config, upgrade=True)
 
 
 INITIAL_CONFIG = """mode: single
@@ -59,6 +78,7 @@ routing:
   max_attempts: 0
   allow_provider_override: false
   paid_fallback: true
+  retry_attempts: 1
 observability:
   include_upstream_errors: false
 providers:
@@ -137,6 +157,10 @@ def main() -> None:
     parser.add_argument("--reload", action="store_true", help="development auto-reload")
     parser.add_argument("--check", action="store_true", help="validate configuration and exit")
     parser.add_argument("--doctor", action="store_true", help="show deployment safety diagnostics and exit")
+    migrations = parser.add_mutually_exclusive_group()
+    migrations.add_argument("--migration-status", action="store_true", help="show database schema versions and exit")
+    migrations.add_argument("--migrate", action="store_true", help="upgrade the configured database and exit")
+    parser.add_argument("--output", choices=["text", "json"], default="text", help="output format for operational commands")
     parser.add_argument("--generate-secret", action="store_true", help="generate a gateway/admin secret and exit")
     parser.add_argument("--init", action="store_true", help="create secure starter config and .env files")
     parser.add_argument("--init-mode", choices=["single", "multi"], default="single", help="profile used by --init")
@@ -163,6 +187,37 @@ def main() -> None:
     except Exception as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
+
+    if args.migration_status or args.migrate:
+        from .migrations import LATEST_VERSIONS
+
+        try:
+            versions = asyncio.run(migration_status(config, upgrade=args.migrate))
+        except Exception as exc:
+            print(f"Migration error: {type(exc).__name__}: {exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
+        result = {
+            "storage": "disabled" if not versions else (
+                "postgresql" if config.database.startswith(("postgresql://", "postgres://")) else "sqlite"
+            ),
+            "action": "upgrade" if args.migrate else "status",
+            "components": {
+                name: {"current": version, "latest": LATEST_VERSIONS[name], "pending": version < LATEST_VERSIONS[name]}
+                for name, version in versions.items()
+            },
+        }
+        if args.output == "json":
+            import json
+            print(json.dumps(result, sort_keys=True))
+        else:
+            print(f"Storage: {result['storage']}")
+            print(f"Action: {result['action']}")
+            if not versions:
+                print("Schema: not required by enabled features")
+            for name, state in result["components"].items():
+                label = "pending" if state["pending"] else "current"
+                print(f"{name}: {state['current']} / {state['latest']} ({label})")
+        return
 
     if args.check:
         configured = sum(p.enabled and bool(p.api_key()) for p in config.providers)

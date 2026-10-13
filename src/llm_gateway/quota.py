@@ -4,9 +4,9 @@ import asyncio
 import sqlite3
 import time
 from dataclasses import dataclass
-from pathlib import Path
 
 from .config import Limit, ProviderConfig
+from .migrations import migrate_sqlite
 
 
 @dataclass(frozen=True)
@@ -36,37 +36,10 @@ class QuotaStore:
         self._lock = asyncio.Lock()
 
     async def initialize(self) -> None:
-        Path(self.database).parent.mkdir(parents=True, exist_ok=True)
         async with self._lock:
+            migrate_sqlite(self.database, ("usage",))
             with self._connect() as db:
                 db.execute("PRAGMA journal_mode=WAL")
-                db.execute(
-                    """CREATE TABLE IF NOT EXISTS usage_events (
-                    provider TEXT NOT NULL, request_id TEXT PRIMARY KEY,
-                    created_at REAL NOT NULL, requests INTEGER NOT NULL,
-                    tokens INTEGER NOT NULL, status TEXT NOT NULL,
-                    model TEXT, prompt_tokens INTEGER NOT NULL DEFAULT 0,
-                    completion_tokens INTEGER NOT NULL DEFAULT 0,
-                    cost_usd REAL NOT NULL DEFAULT 0,
-                    consumer_id TEXT)"""
-                )
-                existing = {row[1] for row in db.execute("PRAGMA table_info(usage_events)")}
-                migrations = {
-                    "model": "TEXT",
-                    "prompt_tokens": "INTEGER NOT NULL DEFAULT 0",
-                    "completion_tokens": "INTEGER NOT NULL DEFAULT 0",
-                    "cost_usd": "REAL NOT NULL DEFAULT 0",
-                    "consumer_id": "TEXT",
-                }
-                for column, definition in migrations.items():
-                    if column not in existing:
-                        db.execute(f"ALTER TABLE usage_events ADD COLUMN {column} {definition}")
-                db.execute(
-                    "CREATE INDEX IF NOT EXISTS usage_provider_time ON usage_events(provider, created_at)"
-                )
-                db.execute(
-                    "CREATE INDEX IF NOT EXISTS usage_consumer_time ON usage_events(consumer_id, created_at)"
-                )
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.database, timeout=30)

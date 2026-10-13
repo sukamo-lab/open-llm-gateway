@@ -10,6 +10,7 @@ import asyncpg
 
 from .config import Limit, ProviderConfig
 from .identity import AuthContext
+from .migrations import migrate_postgres, postgres_status
 from .quota import Reservation
 
 
@@ -46,42 +47,21 @@ class PostgresStore:
         if self.pool:
             return
         self.pool = await asyncpg.create_pool(self.dsn, min_size=1, max_size=20, command_timeout=30)
-        async with self.pool.acquire() as db:
-            if self.usage_enabled:
-                await db.execute("""
-                CREATE TABLE IF NOT EXISTS usage_events (
-                  provider TEXT NOT NULL, request_id TEXT PRIMARY KEY,
-                  created_at DOUBLE PRECISION NOT NULL, requests INTEGER NOT NULL,
-                  tokens BIGINT NOT NULL, status TEXT NOT NULL, model TEXT,
-                  prompt_tokens BIGINT NOT NULL DEFAULT 0,
-                  completion_tokens BIGINT NOT NULL DEFAULT 0,
-                  cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
-                  consumer_id TEXT
-                );
-                CREATE INDEX IF NOT EXISTS usage_provider_time
-                  ON usage_events(provider, created_at);
-                CREATE INDEX IF NOT EXISTS usage_consumer_time
-                  ON usage_events(consumer_id, created_at);
-                """)
-            if self.identity_enabled:
-                await db.execute("""
-                CREATE TABLE IF NOT EXISTS tenants (
-                  id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE,
-                  active BOOLEAN NOT NULL DEFAULT TRUE,
-                  requests_per_minute INTEGER, tokens_per_day BIGINT,
-                  cost_per_30_days DOUBLE PRECISION,
-                  created_at DOUBLE PRECISION NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS consumer_keys (
-                  id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id),
-                  name TEXT NOT NULL, key_prefix TEXT NOT NULL,
-                  key_hash TEXT NOT NULL UNIQUE, active BOOLEAN NOT NULL DEFAULT TRUE,
-                  created_at DOUBLE PRECISION NOT NULL, last_used_at DOUBLE PRECISION,
-                  expires_at DOUBLE PRECISION
-                );
-                ALTER TABLE consumer_keys ADD COLUMN IF NOT EXISTS expires_at DOUBLE PRECISION;
-                CREATE INDEX IF NOT EXISTS consumer_keys_hash ON consumer_keys(key_hash);
-                """)
+        components = []
+        if self.usage_enabled:
+            components.append("usage")
+        if self.identity_enabled:
+            components.append("identity")
+        await migrate_postgres(self.pool, components)
+
+    async def migration_status(self) -> dict[str, int]:
+        assert self.pool
+        components = []
+        if self.usage_enabled:
+            components.append("usage")
+        if self.identity_enabled:
+            components.append("identity")
+        return await postgres_status(self.pool, components)
 
     async def close(self) -> None:
         if self.pool:

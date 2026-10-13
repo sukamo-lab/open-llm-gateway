@@ -146,3 +146,54 @@ async def test_empty_success_response_fails_over(tmp_path, monkeypatch):
     assert body["id"] == "ok"
     assert selected == "paid"
 
+
+@pytest.mark.asyncio
+async def test_transient_response_retries_same_provider_with_retry_after(tmp_path, monkeypatch):
+    monkeypatch.setenv("FREE_KEY", "secret")
+    config = make_config(
+        tmp_path,
+        [provider("free", "free", "FREE_KEY", [{"name": "chat", "upstream_model": "free"}])],
+    )
+    config.routing.retry_attempts = 2
+    calls = 0
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(429, headers={"Retry-After": "0"}, json={"error": "limited"})
+        return httpx.Response(200, json={"id": "ok", "choices": [], "usage": {"total_tokens": 1}})
+
+    quota = QuotaStore(config.database)
+    await quota.initialize()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        body, selected, _ = await GatewayRouter(config, quota, client).complete(
+            {"model": "chat", "messages": []}
+        )
+    assert selected == "free"
+    assert calls == 2
+    assert body["_gateway_meta"]["upstream_attempts"] == 2
+
+
+@pytest.mark.asyncio
+async def test_non_transient_error_does_not_retry(tmp_path, monkeypatch):
+    monkeypatch.setenv("FREE_KEY", "secret")
+    config = make_config(
+        tmp_path,
+        [provider("free", "free", "FREE_KEY", [{"name": "chat", "upstream_model": "free"}])],
+    )
+    config.routing.retry_attempts = 3
+    calls = 0
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(400, json={"error": "invalid"})
+
+    quota = QuotaStore(config.database)
+    await quota.initialize()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(Exception):
+            await GatewayRouter(config, quota, client).complete({"model": "chat", "messages": []})
+    assert calls == 1
+

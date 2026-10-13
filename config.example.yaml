@@ -34,6 +34,13 @@ routing:
   http_max_connections: 200
   http_max_keepalive_connections: 50
   http_keepalive_expiry_seconds: 30
+  # 1 preserves immediate provider failover. Increase for transient same-provider retries.
+  retry_attempts: 1
+  retry_initial_backoff_seconds: 0.25
+  retry_max_backoff_seconds: 8
+  retry_jitter_ratio: 0.2
+  # Optional end-to-end deadline across retries for one provider candidate.
+  request_deadline_seconds: null
 
 observability:
   # Keep vendor response details out of public 503 errors in production.
