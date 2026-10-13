@@ -12,6 +12,7 @@ features:
   cost_tracking: true
   metrics: true
   circuit_breaker: true
+  structured_logging: true
 
 server:
   host: 0.0.0.0
@@ -45,6 +46,11 @@ routing:
 observability:
   # Keep vendor response details out of public 503 errors in production.
   include_upstream_errors: false
+  log_requests: true
+  log_provider_attempts: true
+  log_health_checks: false
+  # Stack traces may contain provider/library details; disabled for safe defaults.
+  include_exception_stacktraces: false
 
 accounting:
   retention_days: 90

@@ -15,6 +15,8 @@
 
 Every response includes `X-Request-ID`. Supply your own header to correlate gateway and application logs.
 
+With `features.structured_logging`, each request emits one JSON completion event carrying the same `request.id`; authenticated traffic also includes the non-secret tenant identifier. Provider retry events carry provider/model/attempt metadata but never prompts, responses, headers, or credentials. Send stdout/stderr to the platform log collector rather than writing rotating files inside the container.
+
 ## Preflight
 
 `llm-gateway --check` performs strict YAML/schema/secret-source validation. `llm-gateway --doctor` additionally reports unsafe deployment choices and verifies SQLite/PostgreSQL connectivity plus schema initialization. It exits nonzero on errors, making it suitable for CI and container pre-deployment checks. `llm-gateway --generate-secret` prints a cryptographically random secret.

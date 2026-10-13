@@ -39,6 +39,14 @@ Model aliases decouple clients from vendor model IDs. Capabilities document supp
 
 OpenAI-compatible variants can customize `chat_completions_path`, `api_key_header`, `api_key_prefix`, provider `request_defaults`, model `request_overrides`, and arbitrary headers without adding a new adapter. Client request values take precedence over configured defaults and overrides.
 
+## Structured logging
+
+`features.structured_logging` enables newline-delimited JSON logs. It defaults off in single-user mode and on in multi-user mode. When disabled, request correlation and provider log calls are absent from the hot path.
+
+Logs use stable dotted fields including `@timestamp`, `service.name`, `service.version`, `log.level`, `request.id`, `tenant.id`, `http.*`, and provider/model attempt metadata. Request bodies, response bodies, authorization headers, consumer keys, and provider credentials are never logged. Health/readiness request logs are suppressed unless `observability.log_health_checks` is enabled.
+
+`observability.include_exception_stacktraces` is false by default because library or provider exceptions may contain operational details. Enable it only where the log destination has appropriate access controls and retention.
+
 Price fields are metadata expressed in USD per million tokens. Keep prices current when vendors change them.
 
 `accounting.retention_days` controls usage-row retention and must be at least 30 days so tenant rolling spend limits remain enforceable. Cleanup runs during startup.

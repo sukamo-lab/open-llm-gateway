@@ -64,6 +64,7 @@ features:
   cost_tracking: false
   metrics: false
   circuit_breaker: true
+  structured_logging: false
 server:
   host: 127.0.0.1
   port: 8000
@@ -111,6 +112,7 @@ def initialize_project(config_path: Path, env_path: Path, mode: str) -> None:
         for feature in (
             "authentication", "admin_api", "managed_keys", "tenant_quotas",
             "provider_quotas", "usage_accounting", "cost_tracking", "metrics",
+            "structured_logging",
         ):
             config_text = config_text.replace(f"  {feature}: false", f"  {feature}: true", 1)
         env_text += (
@@ -252,10 +254,16 @@ def main() -> None:
     if args.reload and workers != 1:
         parser.error("--reload requires exactly one worker")
     os.environ["LLM_GATEWAY_CONFIG"] = str(config_path)
+    if config.features.structured_logging:
+        from .logging_config import configure_logging
+
+        configure_logging(args.log_level, config.observability.include_exception_stacktraces)
     uvicorn.run(
         "llm_gateway.app:app", host=args.host or config.server.host,
         port=args.port or config.server.port, workers=workers,
         reload=args.reload, log_level=args.log_level,
+        log_config=None if config.features.structured_logging else uvicorn.config.LOGGING_CONFIG,
+        access_log=not config.features.structured_logging,
         proxy_headers=True, forwarded_allow_ips="127.0.0.1",
     )
 
