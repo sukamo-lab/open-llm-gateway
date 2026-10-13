@@ -1,0 +1,403 @@
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+import secrets
+import hashlib
+import logging
+import time
+from typing import Any
+import uuid
+
+import httpx
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from pydantic import BaseModel, Field
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from . import __version__
+from .config import load_config
+from .metrics import Metrics, NullMetrics
+from .identity import AuthContext, IdentityStore
+from .quota import NullQuotaStore, QuotaStore
+from .router import GatewayRouter, NoModelAvailable, QuotaExceeded
+
+logger = logging.getLogger("llm_gateway")
+
+
+class TenantCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    requests_per_minute: int | None = Field(default=None, gt=0)
+    tokens_per_day: int | None = Field(default=None, gt=0)
+    cost_per_30_days: float | None = Field(default=None, gt=0)
+
+
+class KeyCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    expires_in_days: int | None = Field(default=None, gt=0, le=3650)
+
+
+class TenantUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    active: bool | None = None
+    requests_per_minute: int | None = Field(default=None, gt=0)
+    tokens_per_day: int | None = Field(default=None, gt=0)
+    cost_per_30_days: float | None = Field(default=None, gt=0)
+
+
+class BodyTooLarge(Exception):
+    pass
+
+
+class BodyLimitMiddleware:
+    def __init__(self, app, max_bytes: int):
+        self.app, self.max_bytes = app, max_bytes
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        headers = {key.lower(): value for key, value in scope.get("headers", [])}
+        try:
+            content_length = int(headers.get(b"content-length", b"0") or 0)
+        except ValueError:
+            content_length = 0
+        if content_length > self.max_bytes:
+            return await JSONResponse(
+                status_code=413,
+                content={"error": {"message": "request body too large", "type": "invalid_request_error", "code": "body_too_large"}},
+            )(scope, receive, send)
+        consumed = 0
+
+        async def limited_receive():
+            nonlocal consumed
+            message = await receive()
+            consumed += len(message.get("body", b""))
+            if consumed > self.max_bytes:
+                raise BodyTooLarge
+            return message
+
+        try:
+            return await self.app(scope, limited_receive, send)
+        except BodyTooLarge:
+            return await JSONResponse(
+                status_code=413,
+                content={"error": {"message": "request body too large", "type": "invalid_request_error", "code": "body_too_large"}},
+            )(scope, receive, send)
+
+
+def create_app(config_path: str = "config.yaml") -> FastAPI:
+    config = load_config(config_path)
+    quota_enabled = bool(
+        config.features.provider_quotas
+        or config.features.tenant_quotas
+        or config.features.usage_accounting
+    )
+    identity_enabled = bool(config.features.managed_keys)
+    shared_store = None
+    if config.database.startswith(("postgresql://", "postgres://")) and (quota_enabled or identity_enabled):
+        from .postgres import PostgresStore
+        shared_store = PostgresStore(
+            config.database, config.auth.key_cache_seconds,
+            config.auth.key_cache_max_entries,
+            identity_enabled=identity_enabled,
+            provider_quotas=bool(config.features.provider_quotas),
+            tenant_quotas=bool(config.features.tenant_quotas),
+            accounting=bool(config.features.usage_accounting),
+            cost_tracking=bool(config.features.cost_tracking),
+        )
+        quota = shared_store if quota_enabled else NullQuotaStore()
+        identities = shared_store if identity_enabled else None
+    else:
+        quota = (
+            QuotaStore(
+                config.database,
+                provider_quotas=bool(config.features.provider_quotas),
+                tenant_quotas=bool(config.features.tenant_quotas),
+                accounting=bool(config.features.usage_accounting),
+                cost_tracking=bool(config.features.cost_tracking),
+            ) if quota_enabled else NullQuotaStore()
+        )
+        identities = (
+            IdentityStore(
+                config.database, config.auth.key_cache_seconds,
+                config.auth.key_cache_max_entries,
+            ) if identity_enabled else None
+        )
+    metrics = Metrics() if config.features.metrics else NullMetrics()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        await quota.initialize()
+        if identities is not None and identities is not quota:
+            await identities.initialize()
+        removed = await quota.cleanup(
+            time.time() - config.accounting.retention_days * 86400
+        )
+        if removed:
+            logger.info("Removed %s expired accounting records", removed)
+        limits = httpx.Limits(
+            max_connections=config.routing.http_max_connections,
+            max_keepalive_connections=config.routing.http_max_keepalive_connections,
+            keepalive_expiry=config.routing.http_keepalive_expiry_seconds,
+        )
+        async with httpx.AsyncClient(follow_redirects=True, limits=limits) as client:
+            app.state.router = GatewayRouter(config, quota, client, metrics)
+            yield
+        close = getattr(shared_store or quota, "close", None)
+        if close:
+            await close()
+
+    app = FastAPI(
+        title="LLM Gateway", version=__version__, lifespan=lifespan,
+        docs_url="/docs" if config.server.docs_enabled else None,
+        redoc_url="/redoc" if config.server.docs_enabled else None,
+    )
+    app.add_middleware(BodyLimitMiddleware, max_bytes=config.server.max_request_body_bytes)
+    if config.server.cors_origins:
+        app.add_middleware(
+            CORSMiddleware, allow_origins=config.server.cors_origins,
+            allow_methods=["*"], allow_headers=["*"], allow_credentials=False,
+        )
+
+    @app.exception_handler(StarletteHTTPException)
+    async def openai_http_error(_request: Request, exc: StarletteHTTPException):
+        message = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+        return JSONResponse(
+            status_code=exc.status_code, headers=exc.headers,
+            content={"error": {"message": message, "type": "gateway_error", "code": exc.status_code}},
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(_request: Request, exc: RequestValidationError):
+        return JSONResponse(
+            status_code=422,
+            content={"error": {"message": "request validation failed", "type": "invalid_request_error", "code": "validation_error", "details": exc.errors()}},
+        )
+
+    @app.exception_handler(Exception)
+    async def internal_error(request: Request, exc: Exception):
+        logger.exception(
+            "Unhandled gateway error request_id=%s path=%s",
+            getattr(request.state, "request_id", "unknown"), request.url.path,
+        )
+        return JSONResponse(
+            status_code=500,
+            content={"error": {"message": "internal gateway error", "type": "gateway_error", "code": 500}},
+        )
+
+    def bearer(request: Request) -> str:
+        value = request.headers.get("authorization", "")
+        return value[7:] if value.lower().startswith("bearer ") else ""
+
+    async def require_api(request: Request) -> AuthContext:
+        if not config.features.authentication:
+            return AuthContext("anonymous", "anonymous")
+        token = bearer(request)
+        for key in config.auth.api_keys():
+            if secrets.compare_digest(token, key):
+                identity = hashlib.sha256(key.encode()).hexdigest()[:16]
+                return AuthContext(f"bootstrap-{identity}", f"bootstrap-{identity}")
+        if config.features.managed_keys and identities is not None and token:
+            context = await identities.authenticate(token)
+            if context:
+                return context
+        raise HTTPException(401, "invalid gateway API key", headers={"WWW-Authenticate": "Bearer"})
+
+    def require_admin(request: Request) -> None:
+        if not config.features.authentication:
+            return
+        expected = config.auth.admin_key()
+        if not expected or not secrets.compare_digest(bearer(request), expected):
+            raise HTTPException(403, "administrator credentials required")
+
+    @app.middleware("http")
+    async def request_context(request: Request, call_next):
+        started = time.monotonic() if config.features.metrics else 0
+        supplied_id = request.headers.get("x-request-id", "")
+        request_id = supplied_id if supplied_id and len(supplied_id) <= 128 and supplied_id.isprintable() else str(uuid.uuid4())
+        request.state.request_id = request_id
+        try:
+            response = await call_next(request)
+        except Exception:
+            if config.features.metrics:
+                await metrics.request(request.url.path, 500, (time.monotonic() - started) * 1000)
+            raise
+        response.headers["X-Request-ID"] = request_id
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        if config.features.metrics:
+            await metrics.request(request.url.path, response.status_code, (time.monotonic() - started) * 1000)
+        return response
+
+    @app.get("/health")
+    async def health() -> dict[str, str]:
+        return {"status": "ok"}
+
+    @app.get("/")
+    async def root() -> dict[str, object]:
+        return {
+            "name": "LLM Gateway", "version": __version__, "status": "ok",
+            "endpoints": {"health": "/health", "ready": "/ready", "models": "/v1/models", "docs": "/docs" if config.server.docs_enabled else None},
+        }
+
+    @app.get("/ready")
+    async def ready(request: Request) -> dict[str, object]:
+        configured = [
+            item for item in request.app.state.router.status()
+            if item["enabled"] and item["configured"]
+        ]
+        if not configured:
+            raise HTTPException(503, "no enabled provider has valid credentials")
+        errors = [message for severity, message in config.diagnostics() if severity == "ERROR"]
+        if errors:
+            raise HTTPException(503, "; ".join(errors))
+        return {"status": "ready", "configured_providers": len(configured)}
+
+    @app.get("/v1/models")
+    async def models(request: Request) -> dict[str, Any]:
+        await require_api(request)
+        names = sorted({
+            model.name for provider in config.providers
+            if provider.enabled and provider.api_key() for model in provider.models
+        })
+        return {"object": "list", "data": [{"id": name, "object": "model"} for name in names]}
+
+    @app.get("/admin/usage")
+    async def usage(request: Request) -> list[dict[str, object]]:
+        require_admin(request)
+        return await quota.snapshot()
+
+    @app.get("/admin/usage/tenants")
+    async def tenant_usage(request: Request) -> list[dict[str, object]]:
+        require_admin(request)
+        return await quota.consumer_snapshot()
+
+    @app.post("/admin/tenants", status_code=201)
+    async def create_tenant(request: Request, tenant: TenantCreate) -> dict[str, object]:
+        require_admin(request)
+        try:
+            return await identities.create_tenant(**tenant.model_dump())
+        except Exception as exc:
+            if "unique" in str(exc).lower() or "duplicate key" in str(exc).lower():
+                raise HTTPException(409, "tenant name already exists") from exc
+            raise
+
+    @app.get("/admin/tenants")
+    async def list_tenants(request: Request) -> list[dict[str, object]]:
+        require_admin(request)
+        return await identities.list_tenants()
+
+    @app.patch("/admin/tenants/{tenant_id}")
+    async def update_tenant(request: Request, tenant_id: str, update: TenantUpdate) -> dict[str, object]:
+        require_admin(request)
+        tenant = await identities.update_tenant(tenant_id, update.model_dump(exclude_unset=True))
+        if not tenant:
+            raise HTTPException(404, "tenant not found")
+        return tenant
+
+    @app.post("/admin/tenants/{tenant_id}/keys", status_code=201)
+    async def issue_key(request: Request, tenant_id: str, key: KeyCreate) -> dict[str, object]:
+        require_admin(request)
+        try:
+            return await identities.issue_key(tenant_id, **key.model_dump())
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.get("/admin/tenants/{tenant_id}/keys")
+    async def list_keys(request: Request, tenant_id: str) -> list[dict[str, object]]:
+        require_admin(request)
+        return await identities.list_keys(tenant_id)
+
+    @app.delete("/admin/keys/{key_id}", status_code=204)
+    async def revoke_key(request: Request, key_id: str) -> None:
+        require_admin(request)
+        if not await identities.revoke_key(key_id):
+            raise HTTPException(404, "key not found")
+
+    @app.get("/admin/providers")
+    async def providers(request: Request) -> list[dict[str, Any]]:
+        require_admin(request)
+        return request.app.state.router.status()
+
+    @app.get("/admin/config/diagnostics")
+    async def config_diagnostics(request: Request) -> dict[str, object]:
+        require_admin(request)
+        issues = [{"severity": severity, "message": message} for severity, message in config.diagnostics()]
+        return {"valid": not any(item["severity"] == "ERROR" for item in issues), "issues": issues}
+
+    @app.get("/metrics", response_class=PlainTextResponse)
+    async def prometheus(request: Request) -> str:
+        require_admin(request)
+        return await metrics.render()
+
+    @app.post("/v1/chat/completions")
+    async def chat(request: Request):
+        context = await require_api(request)
+        try:
+            payload = await request.json()
+        except ValueError as exc:
+            raise HTTPException(400, "request body must contain valid JSON") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(400, "request body must be a JSON object")
+        router: GatewayRouter = request.app.state.router
+        tenant_limits = context.limits if config.features.tenant_quotas else ()
+        if payload.get("stream"):
+            iterator = router.stream(payload, context.tenant_id, tenant_limits)
+            try:
+                first = await anext(iterator)
+            except QuotaExceeded as exc:
+                raise HTTPException(429, str(exc)) from exc
+            except NoModelAvailable as exc:
+                raise HTTPException(503, str(exc)) from exc
+            except StopAsyncIteration:
+                first = b""
+
+            async def replay():
+                if first:
+                    yield first
+                async for chunk in iterator:
+                    yield chunk
+
+            return StreamingResponse(replay(), media_type="text/event-stream")
+        try:
+            body, provider, upstream_model = await router.complete_for(
+                payload, context.tenant_id, tenant_limits
+            )
+        except QuotaExceeded as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
+        except NoModelAvailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        meta = body.pop("_gateway_meta", {})
+        return {**body, "gateway": {"provider": provider, "upstream_model": upstream_model, **meta}}
+
+    disabled_paths: set[str] = set()
+    if not config.features.admin_api:
+        disabled_paths.update(
+            route.path for route in app.routes
+            if getattr(route, "path", "").startswith("/admin/")
+        )
+    else:
+        if not config.features.managed_keys:
+            disabled_paths.update(
+                route.path for route in app.routes
+                if getattr(route, "path", "").startswith(("/admin/tenants", "/admin/keys"))
+            )
+        if not config.features.usage_accounting:
+            disabled_paths.update({"/admin/usage", "/admin/usage/tenants"})
+        if not config.features.managed_keys or not config.features.tenant_quotas:
+            disabled_paths.add("/admin/usage/tenants")
+    if not config.features.metrics:
+        disabled_paths.add("/metrics")
+    app.router.routes = [
+        route for route in app.router.routes
+        if getattr(route, "path", None) not in disabled_paths
+    ]
+    return app
+
+
+def app_from_env() -> FastAPI:
+    import os
+    return create_app(os.getenv("LLM_GATEWAY_CONFIG", "config.yaml"))
+
+
+app = app_from_env()

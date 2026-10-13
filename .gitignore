@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.test-tmp/
+.pip-tmp/
+dist/
+build/
+*.egg-info/
+*.pyc
+data/
+config.yaml
+.env
+.env.*
+!.env.example
+local-notes/
+

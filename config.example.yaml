@@ -1,0 +1,86 @@
+mode: multi
+# Use a PostgreSQL DSN for multiple replicas; the file path is ideal for local use.
+database: ${LLM_GATEWAY_DATABASE:-./data/gateway.db}
+
+features:
+  authentication: true
+  admin_api: true
+  managed_keys: true
+  tenant_quotas: true
+  provider_quotas: true
+  usage_accounting: true
+  cost_tracking: true
+  metrics: true
+  circuit_breaker: true
+
+server:
+  host: 0.0.0.0
+  port: 8000
+  docs_enabled: true
+  cors_origins: []
+
+auth:
+  api_keys_env: LLM_GATEWAY_API_KEYS
+  admin_key_env: LLM_GATEWAY_ADMIN_KEY
+  # Use 0 for immediate cross-replica revocation, or a few seconds for lower latency.
+  key_cache_seconds: 5
+  key_cache_max_entries: 10000
+
+routing:
+  # 0 tries every eligible provider. Paid providers always sort after free ones.
+  max_attempts: 0
+  allow_provider_override: false
+  paid_fallback: true
+  http_max_connections: 200
+  http_max_keepalive_connections: 50
+  http_keepalive_expiry_seconds: 30
+
+observability:
+  # Keep vendor response details out of public 503 errors in production.
+  include_upstream_errors: false
+
+accounting:
+  retention_days: 90
+
+providers:
+  - name: google-free
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai
+    api_key_env: GOOGLE_API_KEY
+    tier: free
+    max_concurrency: 5
+    failure_threshold: 3
+    cooldown_seconds: 60
+    limits:
+      # Replace with the limits shown for your Google project.
+      - { requests: 10, window_seconds: 60 }
+    models:
+      - name: fast
+        upstream_model: gemini-2.5-flash
+        priority: 10
+        capabilities: [chat, vision, tools, json]
+      - name: reasoning
+        upstream_model: gemini-2.5-flash
+        reasoning: true
+        priority: 10
+        capabilities: [chat, reasoning, vision, tools, json]
+
+  - name: openai-paid
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    tier: paid
+    max_concurrency: 20
+    limits:
+      # Example rolling account safety budget; adjust to your organization.
+      - { cost_usd: 50, window_seconds: 2592000 }
+    models:
+      - name: fast
+        upstream_model: gpt-4.1-mini
+        priority: 10
+        capabilities: [chat, vision, tools, json]
+        input_cost_per_million: 0.40
+        output_cost_per_million: 1.60
+      - name: reasoning
+        upstream_model: o4-mini
+        reasoning: true
+        priority: 10
+        capabilities: [chat, reasoning, vision, tools, json]

@@ -1,0 +1,43 @@
+# Configuration reference
+
+Configuration is YAML and supports `${ENVIRONMENT_VARIABLE}` plus `${VARIABLE:-default}` substitution. Provider secrets should use `api_key_env` or `api_key_file`; `api_key_value` exists for local development only. Authentication similarly supports `api_keys_file` and `admin_key_file` for mounted Docker/Kubernetes secrets.
+
+`mode: single` selects minimal local defaults; `mode: multi` selects the managed product defaults. The `features` section overrides individual subsystems. See [Runtime modes and feature flags](MODES_AND_FEATURES.md).
+
+Large configurations can use `include: [providers/*.yaml]`. Paths and glob patterns are resolved relative to the including file. Included dictionaries are deep-merged, lists are appended, and the including file takes precedence for scalar values. Include cycles and unmatched patterns are rejected.
+
+## Server
+
+- `host`, `port`: bind address and port. CLI flags override them.
+- `docs_enabled`: serves interactive OpenAPI documentation at `/docs`.
+- `cors_origins`: explicit browser origins. Keep empty for server-to-server deployments.
+
+## Authentication
+
+When `auth.enabled` is true, `/v1/*` requires a bearer token listed in the comma-separated environment variable named by `api_keys_env`. `/admin/*` and `/metrics` require the separate key named by `admin_key_env`. `/health` and `/ready` intentionally remain unauthenticated for orchestrator probes.
+
+`managed_keys_enabled` allows administrator-issued tenant keys. `key_cache_seconds` trades immediate cross-replica revocation for fewer identity lookups; use `0` for immediate enforcement or a small value such as `5` for production.
+
+## Routing
+
+- `max_attempts`: maximum upstreams attempted; `0` means every eligible candidate.
+- `paid_fallback`: set false to prohibit paid providers globally.
+- `allow_provider_override`: enables the non-standard request field `provider`; useful for diagnostics but normally false on public deployments.
+- `http_max_connections`, `http_max_keepalive_connections`, and `http_keepalive_expiry_seconds` tune the shared upstream connection pool. Reused TLS connections minimize gateway overhead.
+- Provider `tier` is `free` or `paid`. Free always sorts first.
+- Lower model `priority` sorts first within a tier.
+- `failure_threshold` consecutive errors open that provider's circuit for `cooldown_seconds`.
+- `max_concurrency` prevents one upstream account from being overloaded.
+
+## Quotas and models
+
+Each provider may have multiple rolling `limits`. A limit can constrain `requests`, `tokens`, `cost_usd`, or any combination over `window_seconds`. Multiple windows can be combined. Reservations are atomic and persisted in SQLite; dollar limits reserve a conservative worst-case estimate and reconcile against reported input/output usage.
+
+Model aliases decouple clients from vendor model IDs. Capabilities document support for `chat`, `reasoning`, `vision`, `tools`, and `json`. A request with `reasoning_effort` only considers reasoning models.
+
+OpenAI-compatible variants can customize `chat_completions_path`, `api_key_header`, `api_key_prefix`, provider `request_defaults`, model `request_overrides`, and arbitrary headers without adding a new adapter. Client request values take precedence over configured defaults and overrides.
+
+Price fields are metadata expressed in USD per million tokens. Keep prices current when vendors change them.
+
+`accounting.retention_days` controls usage-row retention and must be at least 30 days so tenant rolling spend limits remain enforceable. Cleanup runs during startup.
+

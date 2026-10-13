@@ -1,0 +1,172 @@
+schema_version: 1
+product_version: 0.5.0
+last_updated: 2026-10-13
+status_values: [implemented, partial, planned, deferred]
+
+# This is the canonical product capability ledger. Never store credentials,
+# customer data, prompts, or provider responses here.
+features:
+  - id: API-CHAT-001
+    pillar: unified_api
+    name: OpenAI-compatible chat completions and SSE
+    status: implemented
+    verified: 2026-10-12
+    evidence: [src/llm_gateway/app.py, src/llm_gateway/router.py, tests/test_app.py]
+  - id: API-MODEL-001
+    pillar: unified_api
+    name: Model listing, aliases, and capability filtering
+    status: implemented
+    verified: 2026-10-12
+    evidence: [src/llm_gateway/app.py, src/llm_gateway/config.py, tests/test_router.py]
+  - id: API-MULTI-001
+    pillar: unified_api
+    name: Vision, tools, JSON mode, and reasoning pass-through/routing
+    status: implemented
+    verified: 2026-10-12
+    notes: Capability-aware pass-through; compatibility depends on selected upstream model.
+    evidence: [src/llm_gateway/router.py, src/llm_gateway/config.py, tests/test_router.py]
+  - {id: API-RESP-001, pillar: unified_api, name: Responses API, status: planned, target: v0.8}
+  - {id: API-EMBED-001, pillar: unified_api, name: Embeddings API, status: planned, target: v0.8}
+  - {id: API-MOD-001, pillar: unified_api, name: Moderation API, status: planned, target: v0.8}
+  - {id: API-AUDIO-001, pillar: unified_api, name: Audio APIs, status: planned, target: v0.8}
+  - {id: API-IMAGE-001, pillar: unified_api, name: Image generation API, status: planned, target: v0.8}
+  - {id: API-IDEMP-001, pillar: unified_api, name: Idempotency keys, status: planned, target: v0.6}
+  - {id: API-BATCH-001, pillar: unified_api, name: Batch API, status: planned, target: v1.0, depends_on: [JOB-ASYNC-001]}
+  - {id: DISC-MODEL-001, pillar: unified_api, name: Controlled upstream model discovery, status: planned, target: v0.8}
+
+  - id: ROUTE-TIER-001
+    pillar: routing
+    name: Free-before-paid tiering, priorities, and paid fallback control
+    status: implemented
+    verified: 2026-10-12
+    evidence: [src/llm_gateway/router.py, tests/test_router.py, docs/CONFIGURATION.md]
+  - id: ROUTE-FAIL-001
+    pillar: routing
+    name: Provider failover and capability-aware selection
+    status: implemented
+    verified: 2026-10-12
+    evidence: [src/llm_gateway/router.py, tests/test_router.py]
+  - {id: ROUTE-COST-001, pillar: routing, name: Least-cost routing, status: planned, target: v0.8, depends_on: [OBS-SLA-001]}
+  - {id: ROUTE-LAT-001, pillar: routing, name: Latency-aware routing, status: planned, target: v0.8, depends_on: [OBS-SLA-001]}
+  - {id: ROUTE-POLICY-001, pillar: routing, name: Declarative quality/region/residency routing, status: planned, target: v0.8}
+
+  - id: RES-CB-001
+    pillar: resilience
+    name: Per-process circuit breakers and provider concurrency limits
+    status: implemented
+    verified: 2026-10-12
+    evidence: [src/llm_gateway/router.py, tests/test_router.py]
+  - id: RES-POOL-001
+    pillar: resilience
+    name: Shared HTTP connection pool and TLS reuse
+    status: implemented
+    verified: 2026-10-12
+    evidence: [src/llm_gateway/app.py, src/llm_gateway/config.py]
+  - {id: RES-RETRY-001, pillar: resilience, name: Deadline-aware exponential retry with jitter, status: planned, target: v0.6}
+  - {id: RES-DISTCB-001, pillar: resilience, name: Distributed circuit and concurrency coordination, status: planned, target: v1.0}
+  - {id: CACHE-EXACT-001, pillar: resilience, name: Exact tenant-isolated cache, status: planned, target: v0.7}
+  - {id: CACHE-SEM-001, pillar: resilience, name: Privacy-aware semantic cache, status: planned, target: v1.0, depends_on: [CACHE-EXACT-001, API-EMBED-001]}
+
+  - id: IAM-MODE-001
+    pillar: iam
+    name: Minimal single-user and managed multi-user modes
+    status: implemented
+    verified: 2026-10-12
+    evidence: [src/llm_gateway/config.py, docs/MODES_AND_FEATURES.md, tests/test_config.py]
+  - id: IAM-KEY-001
+    pillar: iam
+    name: Expiring and revocable tenant consumer keys
+    status: implemented
+    verified: 2026-10-12
+    evidence: [src/llm_gateway/identity.py, tests/test_identity.py, docs/MULTI_TENANCY.md]
+  - {id: IAM-HIER-001, pillar: iam, name: Organization/project/user/service-account hierarchy, status: planned, target: v0.9}
+  - {id: IAM-RBAC-001, pillar: iam, name: RBAC and scoped API keys, status: planned, target: v0.9, depends_on: [IAM-HIER-001]}
+  - {id: IAM-OIDC-001, pillar: iam, name: OIDC and brokered SAML SSO, status: planned, target: v0.9, depends_on: [IAM-RBAC-001]}
+
+  - id: FIN-QUOTA-001
+    pillar: finops
+    name: Provider and tenant request/token/spend quotas with reservations
+    status: implemented
+    verified: 2026-10-12
+    evidence: [src/llm_gateway/quota.py, src/llm_gateway/postgres.py, tests/test_quota.py]
+  - id: FIN-COST-001
+    pillar: finops
+    name: Token and configured-price cost accounting
+    status: implemented
+    verified: 2026-10-12
+    evidence: [src/llm_gateway/quota.py, src/llm_gateway/router.py]
+  - {id: FIN-PLAN-001, pillar: finops, name: Plans entitlements credits and budget alerts, status: planned, target: v1.0}
+  - {id: FIN-EXPORT-001, pillar: finops, name: Immutable usage export and reconciliation, status: planned, target: v1.0, depends_on: [AUDIT-LEDGER-001]}
+  - {id: FIN-STRIPE-001, pillar: finops, name: Optional Stripe billing adapter, status: planned, target: v1.0, depends_on: [FIN-PLAN-001, FIN-EXPORT-001]}
+
+  - id: SEC-SECRET-001
+    pillar: governance
+    name: Environment and mounted-file provider secrets
+    status: implemented
+    verified: 2026-10-12
+    evidence: [src/llm_gateway/config.py, docs/CONFIGURATION.md]
+  - id: SEC-HARD-001
+    pillar: governance
+    name: Constant-time key comparison, bounded bodies, safe public errors, strict CORS
+    status: implemented
+    verified: 2026-10-12
+    evidence: [src/llm_gateway/app.py, src/llm_gateway/identity.py, tests/test_app.py]
+  - {id: GOV-PII-001, pillar: governance, name: Pluggable PII detection and redaction, status: planned, target: v0.7}
+  - {id: GOV-MOD-001, pillar: governance, name: Pluggable input/output moderation, status: planned, target: v0.7}
+  - {id: GOV-INJECT-001, pillar: governance, name: Prompt-injection risk policy, status: planned, target: v0.7}
+  - {id: GOV-RESIDENCY-001, pillar: governance, name: Data residency enforcement, status: planned, target: v0.9, depends_on: [ROUTE-POLICY-001]}
+  - {id: SEC-ENC-001, pillar: governance, name: Envelope encryption for persisted sensitive fields, status: planned, target: v0.9}
+  - {id: SEC-CREDROT-001, pillar: governance, name: Zero-downtime provider credential rotation, status: planned, target: v0.9}
+
+  - id: OBS-METRIC-001
+    pillar: observability
+    name: Prometheus metrics, health, readiness, and diagnostics
+    status: implemented
+    verified: 2026-10-12
+    evidence: [src/llm_gateway/metrics.py, src/llm_gateway/app.py, tests/test_app.py]
+  - {id: OBS-LOG-001, pillar: observability, name: Structured JSON logging and correlation, status: planned, target: v0.6}
+  - {id: OBS-OTEL-001, pillar: observability, name: OpenTelemetry tracing and OTLP export, status: planned, target: v0.7, depends_on: [OBS-LOG-001]}
+  - {id: OBS-SLA-001, pillar: observability, name: Provider/model SLA histograms and dashboards, status: planned, target: v0.7}
+  - {id: AUDIT-LEDGER-001, pillar: observability, name: Tamper-evident audit ledger and export, status: planned, target: v0.9}
+
+  - id: CFG-YAML-001
+    pillar: dx_deployment
+    name: Strict YAML, environment expansion, includes, and feature flags
+    status: implemented
+    verified: 2026-10-12
+    evidence: [src/llm_gateway/config.py, tests/test_config.py, docs/CONFIGURATION.md]
+  - id: STORE-DB-001
+    pillar: dx_deployment
+    name: SQLite and PostgreSQL storage implementations
+    status: implemented
+    verified: 2026-10-12
+    notes: PostgreSQL live integration verification remains part of DX-TEST-001.
+    evidence: [src/llm_gateway/quota.py, src/llm_gateway/postgres.py]
+  - id: DEPLOY-BASE-001
+    pillar: dx_deployment
+    name: Windows/Linux Python service, Docker, Compose, and operator CLI
+    status: implemented
+    verified: 2026-10-12
+    evidence: [Dockerfile, docker-compose.yml, src/llm_gateway/cli.py, src/llm_gateway/admin_cli.py, docs/DEPLOYMENT.md]
+  - {id: DATA-MIG-001, pillar: dx_deployment, name: Versioned database migrations and rollback, status: planned, target: v0.6}
+  - id: DX-TEST-001
+    pillar: dx_deployment
+    name: Cross-platform CI and PostgreSQL integration suite
+    status: partial
+    target: v0.6
+    evidence:
+      - .github/workflows/ci.yml
+      - tests/integration/test_postgres.py
+      - docs/DEVELOPMENT.md
+      - pyproject.toml
+    notes: CI and direct PostgreSQL coverage are implemented; status remains partial until the hosted Windows/Linux/PostgreSQL/container workflow completes successfully.
+  - {id: DX-RELEASE-001, pillar: dx_deployment, name: Reproducible signed releases and compatibility policy, status: planned, target: v0.6}
+  - {id: CFG-RELOAD-001, pillar: dx_deployment, name: Atomic validated hot reload, status: planned, target: v0.8}
+  - {id: JOB-ASYNC-001, pillar: dx_deployment, name: Durable asynchronous jobs and signed webhooks, status: planned, target: v1.0}
+  - {id: DEPLOY-HELM-001, pillar: dx_deployment, name: Hardened Kubernetes Helm chart, status: planned, target: v1.0}
+  - {id: OPS-DR-001, pillar: dx_deployment, name: Backup restore and disaster-recovery drills, status: planned, target: v1.0}
+  - {id: UI-CONSOLE-001, pillar: dx_deployment, name: Optional web management console, status: planned, target: v1.x}
+  - {id: SDK-GEN-001, pillar: dx_deployment, name: Generated SDKs and typed configuration schema, status: planned, target: v1.x}
+  - {id: PLUGIN-SDK-001, pillar: dx_deployment, name: Versioned extension SDK, status: planned, target: v1.x}
+  - {id: DEPLOY-BIN-001, pillar: dx_deployment, name: Signed standalone Windows/Linux binaries, status: planned, target: v1.x}
+
