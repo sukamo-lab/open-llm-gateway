@@ -47,6 +47,22 @@ Logs use stable dotted fields including `@timestamp`, `service.name`, `service.v
 
 `observability.include_exception_stacktraces` is false by default because library or provider exceptions may contain operational details. Enable it only where the log destination has appropriate access controls and retention.
 
+## Idempotency
+
+`features.idempotency` enables persistent handling of the `Idempotency-Key` request header for non-streaming chat completions. It defaults off in single-user mode and on in multi-user mode. Keys are SHA-256 hashed before persistence, scoped to the authenticated tenant, and never logged.
+
+The first request owns a time-limited lease. Concurrent replicas coalesce on the same database record; completed responses replay with `Idempotent-Replayed: true`. Reusing a key with a different canonical request returns HTTP 409. Failed upstream requests release their claim so a later call can retry. Expired leases allow recovery when an owner process terminates.
+
+- `ttl_seconds`: replay retention, from one minute to seven days.
+- `lease_seconds`: maximum ownership period before another replica may recover an abandoned request. Set it above the maximum upstream deadline.
+- `wait_timeout_seconds` and `poll_interval_seconds`: bound concurrent duplicate waiting.
+- `max_response_bytes`: responses larger than this are returned but not persisted; inspect `Idempotency-Stored`.
+- `min_key_length` and `max_key_length`: accepted visible-ASCII header length.
+
+Streaming requests reject `Idempotency-Key`: replaying a partially delivered SSE response could duplicate side effects or corrupt client state.
+
+Cached records contain model responses and should receive the same database access controls, encryption, backup policy, and retention review as other application data. Disable the feature for workloads whose responses must not be persisted.
+
 Price fields are metadata expressed in USD per million tokens. Keep prices current when vendors change them.
 
 `accounting.retention_days` controls usage-row retention and must be at least 30 days so tenant rolling spend limits remain enforceable. Cleanup runs during startup.

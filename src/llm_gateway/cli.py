@@ -20,6 +20,8 @@ def storage_components(config) -> tuple[str, ...]:
         components.append("usage")
     if config.features.managed_keys:
         components.append("identity")
+    if config.features.idempotency:
+        components.append("idempotency")
     return tuple(components)
 
 
@@ -65,6 +67,7 @@ features:
   metrics: false
   circuit_breaker: true
   structured_logging: false
+  idempotency: false
 server:
   host: 127.0.0.1
   port: 8000
@@ -113,6 +116,7 @@ def initialize_project(config_path: Path, env_path: Path, mode: str) -> None:
             "authentication", "admin_api", "managed_keys", "tenant_quotas",
             "provider_quotas", "usage_accounting", "cost_tracking", "metrics",
             "structured_logging",
+            "idempotency",
         ):
             config_text = config_text.replace(f"  {feature}: false", f"  {feature}: true", 1)
         env_text += (

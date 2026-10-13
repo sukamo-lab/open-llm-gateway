@@ -1,6 +1,6 @@
 # Database migrations
 
-Database schemas are versioned independently by component. `usage` exists only when quotas or accounting are enabled; `identity` exists only when managed keys are enabled. Minimal single-user mode therefore creates no database or migration metadata.
+Database schemas are versioned independently by component. `usage` exists only when quotas or accounting are enabled; `identity` exists only when managed keys are enabled; `idempotency` exists only when persistent replay is enabled. Minimal single-user mode therefore creates no database or migration metadata.
 
 ## Inspect and upgrade
 

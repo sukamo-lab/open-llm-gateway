@@ -6,6 +6,7 @@ import uuid
 import pytest
 
 from llm_gateway.config import Limit, ProviderConfig
+from llm_gateway.idempotency import PostgresIdempotencyStore, key_hash, request_hash
 from llm_gateway.postgres import PostgresStore
 
 
@@ -74,5 +75,25 @@ async def test_postgres_tenant_key_lifecycle_and_limits():
 
         assert await store.revoke_key(issued["id"])
         assert await store.authenticate(issued["api_key"]) is None
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_postgres_idempotency_claim_and_replay():
+    store = PostgresIdempotencyStore(postgres_dsn(), 3600, 60)
+    await store.initialize()
+    suffix = uuid.uuid4().hex
+    digest = key_hash(f"key-{suffix}")
+    fingerprint = request_hash({"model": "chat", "messages": []})
+    try:
+        claim = await store.claim(f"tenant-{suffix}", digest, fingerprint)
+        assert claim.status == "owner"
+        assert await store.complete(
+            f"tenant-{suffix}", digest, claim.owner_token, '{"id":"cached"}'
+        )
+        replay = await store.claim(f"tenant-{suffix}", digest, fingerprint)
+        assert replay.status == "cached"
+        assert replay.response == {"id": "cached"}
     finally:
         await store.close()
