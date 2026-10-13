@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import random
 import uuid
 import asyncio
@@ -19,6 +20,7 @@ from .metrics import Metrics
 
 FAILOVER_STATUS = {401, 403, 404, 408, 409, 425, 429, 500, 502, 503, 504}
 RETRY_STATUS = {408, 425, 429, 500, 502, 503, 504}
+logger = logging.getLogger("llm_gateway.router")
 
 
 class NoModelAvailable(RuntimeError):
@@ -44,6 +46,9 @@ class GatewayRouter:
         self.quota = quota
         self.client = client
         self.metrics = metrics or Metrics()
+        self.log_provider_attempts = bool(
+            config.features.structured_logging and config.observability.log_provider_attempts
+        )
         self._failures: dict[str, int] = {}
         self._open_until: dict[str, float] = {}
         self._semaphores = {
@@ -193,12 +198,27 @@ class GatewayRouter:
             except httpx.HTTPError as exc:
                 await self.quota.reconcile(reservation, None, False)
                 await self._failed(candidate.provider)
+                if self.log_provider_attempts:
+                    logger.warning(
+                        "Provider request failed",
+                        extra={"event_name": "provider.request", "provider": candidate.provider.name,
+                               "model": candidate.model.name, "upstream_model": candidate.model.upstream_model,
+                               "outcome": type(exc).__name__},
+                    )
                 errors.append(f"{candidate.provider.name}: {type(exc).__name__}")
                 continue
             if response.is_error:
                 await self.quota.reconcile(reservation, None, False)
                 await self._failed(candidate.provider)
                 detail = self.upstream_error(response)
+                if self.log_provider_attempts:
+                    logger.warning(
+                        "Provider returned an error",
+                        extra={"event_name": "provider.request", "provider": candidate.provider.name,
+                               "model": candidate.model.name, "upstream_model": candidate.model.upstream_model,
+                               "http_status_code": response.status_code,
+                               "attempt": upstream_attempts, "outcome": "error"},
+                    )
                 if not self.config.observability.include_upstream_errors:
                     detail = "upstream request failed"
                 errors.append(
@@ -239,6 +259,14 @@ class GatewayRouter:
                 usage.get("completion_tokens") or usage.get("output_tokens"),
             )
             await self._succeeded(candidate.provider)
+            if self.log_provider_attempts:
+                logger.info(
+                    "Provider request completed",
+                    extra={"event_name": "provider.request", "provider": candidate.provider.name,
+                           "model": candidate.model.name, "upstream_model": candidate.model.upstream_model,
+                           "http_status_code": response.status_code,
+                           "attempt": upstream_attempts, "outcome": "success"},
+                )
             body["model"] = candidate.model.name
             body["_gateway_meta"] = {
                 "upstream_attempts": upstream_attempts,
@@ -336,11 +364,27 @@ class GatewayRouter:
                 if response.status_code not in RETRY_STATUS or attempt == routing.retry_attempts:
                     return response, attempt
                 delay = self._retry_delay(response, attempt)
+                if self.log_provider_attempts:
+                    logger.warning(
+                        "Retrying transient provider response",
+                        extra={"event_name": "provider.retry", "provider": candidate.provider.name,
+                               "model": candidate.model.name, "upstream_model": candidate.model.upstream_model,
+                               "attempt": attempt, "http_status_code": response.status_code,
+                               "retry_delay_seconds": round(delay, 3), "outcome": "retry"},
+                    )
             except httpx.HTTPError as exc:
                 last_error = exc
                 if attempt == routing.retry_attempts:
                     raise
                 delay = self._retry_delay(None, attempt)
+                if self.log_provider_attempts:
+                    logger.warning(
+                        "Retrying provider transport failure",
+                        extra={"event_name": "provider.retry", "provider": candidate.provider.name,
+                               "model": candidate.model.name, "upstream_model": candidate.model.upstream_model,
+                               "attempt": attempt, "retry_delay_seconds": round(delay, 3),
+                               "outcome": type(exc).__name__},
+                    )
             if deadline is not None and time.monotonic() + delay >= deadline:
                 break
             if delay:

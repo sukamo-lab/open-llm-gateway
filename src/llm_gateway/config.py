@@ -116,13 +116,13 @@ class GatewayConfig(StrictModel):
                 "authentication": False, "admin_api": False, "managed_keys": False,
                 "tenant_quotas": False, "provider_quotas": False,
                 "usage_accounting": False, "cost_tracking": False,
-                "metrics": False, "circuit_breaker": True,
+                "metrics": False, "circuit_breaker": True, "structured_logging": False,
             },
             "multi": {
                 "authentication": True, "admin_api": True, "managed_keys": True,
                 "tenant_quotas": True, "provider_quotas": True,
                 "usage_accounting": True, "cost_tracking": True,
-                "metrics": True, "circuit_breaker": True,
+                "metrics": True, "circuit_breaker": True, "structured_logging": True,
             },
         }[self.mode]
         for name, default in defaults.items():
@@ -233,6 +233,10 @@ class RoutingConfig(StrictModel):
 
 class ObservabilityConfig(StrictModel):
     include_upstream_errors: bool = True
+    log_requests: bool = True
+    log_provider_attempts: bool = True
+    log_health_checks: bool = False
+    include_exception_stacktraces: bool = False
 
 
 class AccountingConfig(StrictModel):
@@ -249,6 +253,7 @@ class FeatureConfig(StrictModel):
     cost_tracking: bool | None = None
     metrics: bool | None = None
     circuit_breaker: bool | None = None
+    structured_logging: bool | None = None
 
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")

@@ -20,6 +20,7 @@ from . import __version__
 from .config import load_config
 from .metrics import Metrics, NullMetrics
 from .identity import AuthContext, IdentityStore
+from .logging_config import begin_request, bind_tenant, end_request
 from .quota import NullQuotaStore, QuotaStore
 from .router import GatewayRouter, NoModelAvailable, QuotaExceeded
 
@@ -192,15 +193,26 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
 
     async def require_api(request: Request) -> AuthContext:
         if not config.features.authentication:
-            return AuthContext("anonymous", "anonymous")
+            context = AuthContext("anonymous", "anonymous")
+            request.state.tenant_id = context.tenant_id
+            if config.features.structured_logging:
+                bind_tenant(context.tenant_id)
+            return context
         token = bearer(request)
         for key in config.auth.api_keys():
             if secrets.compare_digest(token, key):
                 identity = hashlib.sha256(key.encode()).hexdigest()[:16]
-                return AuthContext(f"bootstrap-{identity}", f"bootstrap-{identity}")
+                context = AuthContext(f"bootstrap-{identity}", f"bootstrap-{identity}")
+                request.state.tenant_id = context.tenant_id
+                if config.features.structured_logging:
+                    bind_tenant(context.tenant_id)
+                return context
         if config.features.managed_keys and identities is not None and token:
             context = await identities.authenticate(token)
             if context:
+                request.state.tenant_id = context.tenant_id
+                if config.features.structured_logging:
+                    bind_tenant(context.tenant_id)
                 return context
         raise HTTPException(401, "invalid gateway API key", headers={"WWW-Authenticate": "Bearer"})
 
@@ -213,21 +225,49 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
 
     @app.middleware("http")
     async def request_context(request: Request, call_next):
-        started = time.monotonic() if config.features.metrics else 0
+        instrumented = bool(config.features.metrics or config.features.structured_logging)
+        started = time.monotonic() if instrumented else 0
         supplied_id = request.headers.get("x-request-id", "")
         request_id = supplied_id if supplied_id and len(supplied_id) <= 128 and supplied_id.isprintable() else str(uuid.uuid4())
         request.state.request_id = request_id
+        context_tokens = begin_request(request_id) if config.features.structured_logging else None
         try:
-            response = await call_next(request)
-        except Exception:
+            try:
+                response = await call_next(request)
+            except Exception:
+                elapsed = (time.monotonic() - started) * 1000
+                if config.features.metrics:
+                    await metrics.request(request.url.path, 500, elapsed)
+                if config.features.structured_logging and config.observability.log_requests:
+                    logger.error(
+                        "HTTP request failed",
+                        extra={"event_name": "http.request", "http_method": request.method,
+                               "http_path": request.url.path, "http_status_code": 500,
+                               "duration_ms": round(elapsed, 3),
+                               "tenant_id": getattr(request.state, "tenant_id", None)},
+                    )
+                raise
+            response.headers["X-Request-ID"] = request_id
+            response.headers["X-Content-Type-Options"] = "nosniff"
+            elapsed = (time.monotonic() - started) * 1000 if instrumented else 0
             if config.features.metrics:
-                await metrics.request(request.url.path, 500, (time.monotonic() - started) * 1000)
-            raise
-        response.headers["X-Request-ID"] = request_id
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        if config.features.metrics:
-            await metrics.request(request.url.path, response.status_code, (time.monotonic() - started) * 1000)
-        return response
+                await metrics.request(request.url.path, response.status_code, elapsed)
+            should_log = (
+                config.features.structured_logging and config.observability.log_requests
+                and (config.observability.log_health_checks or request.url.path not in {"/health", "/ready"})
+            )
+            if should_log:
+                logger.info(
+                    "HTTP request completed",
+                    extra={"event_name": "http.request", "http_method": request.method,
+                           "http_path": request.url.path, "http_status_code": response.status_code,
+                           "duration_ms": round(elapsed, 3),
+                           "tenant_id": getattr(request.state, "tenant_id", None)},
+                )
+            return response
+        finally:
+            if context_tokens is not None:
+                end_request(context_tokens)
 
     @app.get("/health")
     async def health() -> dict[str, str]:
