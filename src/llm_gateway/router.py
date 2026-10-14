@@ -140,12 +140,59 @@ class GatewayRouter:
         )
 
     @staticmethod
+    def estimated_cost(candidate: Candidate, input_tokens: int, output_tokens: int) -> float | None:
+        model = candidate.model
+        known = bool(
+            model.pricing_version
+            or model.input_cost_per_million > 0
+            or model.output_cost_per_million > 0
+        )
+        if not known:
+            return None
+        return (
+            input_tokens * model.input_cost_per_million
+            + output_tokens * model.output_cost_per_million
+        ) / 1_000_000
+
+    def rank_by_cost(
+        self, candidates: list[Candidate], input_tokens: int, output_tokens: int,
+    ) -> list[Candidate]:
+        if not self.config.features.cost_routing:
+            return candidates
+        if self.config.routing.unknown_price_policy == "exclude":
+            candidates = [
+                candidate for candidate in candidates
+                if self.estimated_cost(candidate, input_tokens, output_tokens) is not None
+            ]
+        return sorted(candidates, key=lambda candidate: (
+            candidate.provider.tier == "paid",
+            self.estimated_cost(candidate, input_tokens, output_tokens) is None,
+            self.estimated_cost(candidate, input_tokens, output_tokens) or 0,
+            candidate.model.priority,
+            candidate.provider.name,
+            candidate.model.upstream_model,
+        ))
+
+    @staticmethod
     def estimate_tokens(payload: dict[str, Any]) -> int:
         # Conservative dependency-free estimate; reservations are reconciled with upstream usage.
-        text = json.dumps(payload.get("messages", []), ensure_ascii=False)
-        input_tokens = max(1, len(text) // 3)
-        output_tokens = int(payload.get("max_completion_tokens") or payload.get("max_tokens") or 1024)
+        input_tokens, output_tokens = GatewayRouter.estimate_chat_tokens(payload)
         return input_tokens + output_tokens
+
+    @staticmethod
+    def estimate_chat_tokens(payload: dict[str, Any]) -> tuple[int, int]:
+        text = json.dumps(payload.get("messages", []), ensure_ascii=False)
+        requested_output = payload.get("max_completion_tokens") or payload.get("max_tokens") or 1024
+        if isinstance(requested_output, bool):
+            requested_output = 1024
+        try:
+            output_tokens = max(1, min(int(requested_output), 10_000_000))
+        except (TypeError, ValueError, OverflowError):
+            output_tokens = 1024
+        return (
+            max(1, len(text) // 3),
+            output_tokens,
+        )
 
     @staticmethod
     def wants_reasoning(payload: dict[str, Any]) -> bool:
@@ -199,6 +246,7 @@ class GatewayRouter:
             requested_model, False, requested_provider, {"embeddings"}
         )
         estimate = self.estimate_embedding_tokens(payload.get("input"))
+        candidates = self.rank_by_cost(candidates, estimate, 0)
         errors: list[str] = []
         max_attempts = self.config.routing.max_attempts or len(candidates)
         for candidate in candidates[:max_attempts]:
@@ -370,6 +418,7 @@ class GatewayRouter:
             requested_model, False, requested_provider, {"audio_speech"}
         )
         estimate = max(1, len(str(payload.get("input", ""))) // 3)
+        candidates = self.rank_by_cost(candidates, estimate, 0)
         errors: list[str] = []
         max_attempts = self.config.routing.max_attempts or len(candidates)
         for candidate in candidates[:max_attempts]:
@@ -430,6 +479,7 @@ class GatewayRouter:
             requested_model, False, requested_provider, {"image_generation"}
         )
         estimate = max(1, len(str(payload.get("prompt", ""))) // 3)
+        candidates = self.rank_by_cost(candidates, estimate, 0)
         errors: list[str] = []
         max_attempts = self.config.routing.max_attempts or len(candidates)
         for candidate in candidates[:max_attempts]:
@@ -507,12 +557,14 @@ class GatewayRouter:
         requested_model = str(payload.get("model", "auto"))
         requested_provider = payload.get("provider")
         estimate = self.estimate_tokens(payload)
+        estimated_input, estimated_output = self.estimate_chat_tokens(payload)
         errors: list[str] = []
         candidates = self.candidates(
             requested_model, self.wants_reasoning(payload), requested_provider,
             self.required_capabilities(payload),
             require_injection_safe,
         )
+        candidates = self.rank_by_cost(candidates, estimated_input, estimated_output)
         if requested_provider and not self.config.routing.allow_provider_override:
             raise NoModelAvailable("provider override is disabled")
         max_attempts = self.config.routing.max_attempts or len(candidates)
@@ -605,6 +657,13 @@ class GatewayRouter:
             body["model"] = candidate.model.name
             body["_gateway_meta"] = {
                 "upstream_attempts": upstream_attempts,
+                "routing": {
+                    "strategy": "least_cost" if self.config.features.cost_routing else "priority",
+                    "estimated_cost_usd": self.estimated_cost(
+                        candidate, estimated_input, estimated_output
+                    ),
+                    "pricing_version": candidate.model.pricing_version,
+                },
                 "rate_limits": {
                     key: value for key, value in response.headers.items()
                     if key.lower().startswith(("x-ratelimit", "ratelimit"))
@@ -625,11 +684,13 @@ class GatewayRouter:
         if requested_provider and not self.config.routing.allow_provider_override:
             raise NoModelAvailable("provider override is disabled")
         estimate = self.estimate_tokens(payload)
+        estimated_input, estimated_output = self.estimate_chat_tokens(payload)
         candidates = self.candidates(
             requested_model, self.wants_reasoning(payload), requested_provider,
             self.required_capabilities(payload),
             require_injection_safe,
         )
+        candidates = self.rank_by_cost(candidates, estimated_input, estimated_output)
         max_attempts = self.config.routing.max_attempts or len(candidates)
         quota_skips = 0
         for candidate in candidates[:max_attempts]:

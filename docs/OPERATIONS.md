@@ -29,6 +29,8 @@ With `features.structured_logging`, each request emits one JSON completion event
 
 Model discovery is operator-triggered and read-only. Protect it with the admin API credential in authenticated deployments. Review `unconfigured` models before adding explicit aliases and capabilities to configuration; discovery never activates a model or changes routing. An upstream failure is isolated to that provider's report so other catalogs remain visible.
 
+For least-cost routing, keep pricing metadata under change control and alert on stale `pricing_version` values through your configuration-management process. Use response `gateway.routing` metadata to explain selections. `unknown_price_policy: exclude` can make every otherwise eligible model unavailable, while `last` preserves availability at the risk of selecting a model whose cost is unknown.
+
 `llm-gateway --init --init-mode single` creates the no-database minimal profile. `--init-mode multi` creates secured consumer/admin credentials and enables the managed feature set.
 
 `llm-gateway --migration-status --output json` reports component schema versions without changing them. `llm-gateway --migrate` applies pending migrations and is suitable for a deployment pre-start job. See [Database migrations](DATABASE_MIGRATIONS.md).

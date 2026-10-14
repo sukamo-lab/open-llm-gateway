@@ -55,6 +55,84 @@ def test_free_models_precede_paid_and_reasoning_is_required(tmp_path, monkeypatc
     assert [item.model.upstream_model for item in router.candidates("auto", True)] == ["paid-reason"]
 
 
+def test_cost_routing_orders_within_tier_and_preserves_free_first(tmp_path, monkeypatch):
+    for key in ("FREE_A", "FREE_B", "PAID_KEY"):
+        monkeypatch.setenv(key, "secret")
+    config = make_config(tmp_path, [
+        provider("free-expensive", "free", "FREE_A", [{
+            "name": "chat", "upstream_model": "free-expensive", "priority": 1,
+            "input_cost_per_million": 2, "output_cost_per_million": 8,
+            "pricing_version": "2026-10",
+        }]),
+        provider("free-cheap", "free", "FREE_B", [{
+            "name": "chat", "upstream_model": "free-cheap", "priority": 100,
+            "input_cost_per_million": 1, "output_cost_per_million": 2,
+            "pricing_version": "2026-10",
+        }]),
+        provider("paid", "paid", "PAID_KEY", [{
+            "name": "chat", "upstream_model": "paid-cheapest", "priority": 1,
+            "input_cost_per_million": 0.01, "output_cost_per_million": 0.01,
+            "pricing_version": "2026-10",
+        }]),
+    ])
+    config.features.cost_routing = True
+    router = GatewayRouter(config, QuotaStore(config.database), httpx.AsyncClient())
+    ranked = router.rank_by_cost(router.candidates("chat", False), 100, 100)
+    assert [item.model.upstream_model for item in ranked] == [
+        "free-cheap", "free-expensive", "paid-cheapest",
+    ]
+
+
+def test_cost_routing_unknown_price_policy_is_explicit(tmp_path, monkeypatch):
+    monkeypatch.setenv("FREE_KEY", "secret")
+    definitions = provider("free", "free", "FREE_KEY", [
+        {"name": "unknown", "upstream_model": "unknown", "priority": 1},
+        {
+            "name": "known", "upstream_model": "known-free", "priority": 2,
+            "pricing_version": "2026-10",
+        },
+    ])
+    config = make_config(tmp_path, [definitions])
+    config.features.cost_routing = True
+    router = GatewayRouter(config, QuotaStore(config.database), httpx.AsyncClient())
+    candidates = router.candidates("auto", False)
+    assert [item.model.upstream_model for item in router.rank_by_cost(candidates, 10, 10)] == [
+        "known-free", "unknown",
+    ]
+    config.routing.unknown_price_policy = "exclude"
+    assert [item.model.upstream_model for item in router.rank_by_cost(candidates, 10, 10)] == [
+        "known-free",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cost_routing_exposes_selected_price_metadata(tmp_path, monkeypatch):
+    monkeypatch.setenv("FREE_KEY", "secret")
+    config = make_config(tmp_path, [provider("free", "free", "FREE_KEY", [{
+        "name": "chat", "upstream_model": "vendor-chat",
+        "input_cost_per_million": 1, "output_cost_per_million": 2,
+        "pricing_version": "2026-10",
+    }])])
+    config.features.cost_routing = True
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+            "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
+        })
+
+    quota = QuotaStore(config.database)
+    await quota.initialize()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        body, _provider, _model = await GatewayRouter(config, quota, client).complete_for({
+            "model": "chat", "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 10,
+        })
+    assert body["_gateway_meta"]["routing"]["strategy"] == "least_cost"
+    assert body["_gateway_meta"]["routing"]["pricing_version"] == "2026-10"
+    assert body["_gateway_meta"]["routing"]["estimated_cost_usd"] > 0
+
+
 def test_prompt_injection_route_only_selects_marked_safe_models(tmp_path, monkeypatch):
     monkeypatch.setenv("FREE_KEY", "secret")
     monkeypatch.setenv("PAID_KEY", "secret")

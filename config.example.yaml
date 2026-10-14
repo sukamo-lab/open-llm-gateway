@@ -26,6 +26,7 @@ features:
   audio_api: false
   images_api: false
   model_discovery: false
+  cost_routing: false
 
 server:
   host: 0.0.0.0
@@ -45,6 +46,7 @@ routing:
   max_attempts: 0
   allow_provider_override: false
   paid_fallback: true
+  unknown_price_policy: last
   http_max_connections: 200
   http_max_keepalive_connections: 50
   http_keepalive_expiry_seconds: 30
@@ -207,6 +209,7 @@ providers:
         capabilities: [chat, vision, tools, json]
         input_cost_per_million: 0.40
         output_cost_per_million: 1.60
+        pricing_version: "2026-10"
       - name: reasoning
         upstream_model: o4-mini
         reasoning: true
