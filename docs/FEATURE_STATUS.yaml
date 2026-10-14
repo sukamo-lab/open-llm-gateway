@@ -64,7 +64,20 @@ features:
       - tests/test_app.py
       - docs/CONFIGURATION.md
     notes: A feature-flagged OpenAI-compatible text moderation endpoint uses the bounded deterministic local engine with batched classification, accepted model aliases, content-free metrics, and explicit rule-score semantics; image moderation, provider-native adapters, calibrated probabilistic scores, full CI, SDK compatibility, latency benchmarks, and governed corpus validation remain pending.
-  - {id: API-AUDIO-001, pillar: unified_api, name: Audio APIs, status: planned, target: v0.8}
+  - id: API-AUDIO-001
+    pillar: unified_api
+    name: Audio APIs
+    status: partial
+    target: v0.8
+    evidence:
+      - src/llm_gateway/audio_api.py
+      - src/llm_gateway/router.py
+      - src/llm_gateway/app.py
+      - tests/test_audio_api.py
+      - tests/test_router.py
+      - tests/test_app.py
+      - docs/CONFIGURATION.md
+    notes: A feature-flagged OpenAI-compatible text-to-speech endpoint supports bounded input and response sizes, common output formats, capability-aware free-first routing, quotas, concurrency, retries, failover, circuits, tracing, metrics, and binary responses; transcription, translation, streaming audio, input governance, provider compatibility CI, character/audio billing, and latency benchmarks remain pending.
   - {id: API-IMAGE-001, pillar: unified_api, name: Image generation API, status: planned, target: v0.8}
   - id: API-IDEMP-001
     pillar: unified_api

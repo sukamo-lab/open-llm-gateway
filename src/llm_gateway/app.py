@@ -14,7 +14,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -482,6 +482,7 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                 **({"responses": "/v1/responses"} if config.features.responses_api else {}),
                 **({"embeddings": "/v1/embeddings"} if config.features.embeddings_api else {}),
                 **({"moderations": "/v1/moderations"} if config.features.moderations_api else {}),
+                **({"audio_speech": "/v1/audio/speech"} if config.features.audio_api else {}),
                 "docs": "/docs" if config.server.docs_enabled else None,
             },
         }
@@ -1125,6 +1126,46 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             raise HTTPException(503, "moderation engine could not evaluate the request") from exc
         return moderation_response(model, reports)
 
+    @app.post("/v1/audio/speech")
+    async def audio_speech(request: Request):
+        context = await require_api(request)
+        if request.headers.get("idempotency-key"):
+            raise HTTPException(400, "Idempotency-Key is not supported for speech requests")
+        try:
+            raw_payload = await request.json()
+        except ValueError as exc:
+            raise HTTPException(400, "request body must contain valid JSON") from exc
+        if not isinstance(raw_payload, dict):
+            raise HTTPException(400, "request body must be a JSON object")
+        from .audio_api import AudioValidationError, CONTENT_TYPES, validate_speech_payload
+
+        try:
+            payload = validate_speech_payload(raw_payload, config.audio)
+        except AudioValidationError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        router: GatewayRouter = request.app.state.router
+        tenant_limits = context.limits if config.features.tenant_quotas else ()
+        try:
+            content, provider, upstream_model, upstream_headers = await router.speech_for(
+                payload, context.tenant_id, tenant_limits
+            )
+        except QuotaExceeded as exc:
+            raise HTTPException(429, str(exc)) from exc
+        except NoModelAvailable as exc:
+            raise HTTPException(503, str(exc)) from exc
+        headers = {
+            "X-Gateway-Provider": provider,
+            "X-Gateway-Upstream-Model": upstream_model,
+        }
+        for name, value in upstream_headers.items():
+            if name.lower().startswith(("x-ratelimit", "ratelimit")):
+                headers[name] = value
+        return Response(
+            content=content,
+            media_type=CONTENT_TYPES[payload["response_format"]],
+            headers=headers,
+        )
+
     disabled_paths: set[str] = set()
     if not config.features.admin_api:
         disabled_paths.update(
@@ -1149,6 +1190,8 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         disabled_paths.add("/v1/embeddings")
     if not config.features.moderations_api:
         disabled_paths.add("/v1/moderations")
+    if not config.features.audio_api:
+        disabled_paths.add("/v1/audio/speech")
     app.router.routes = [
         route for route in app.router.routes
         if getattr(route, "path", None) not in disabled_paths

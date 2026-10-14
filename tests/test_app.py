@@ -169,6 +169,7 @@ def test_responses_api_is_feature_flagged_and_uses_chat_pipeline(tmp_path, monke
     assert response.json()["object"] == "response"
     assert response.json()["output"][0]["content"][0]["text"] == "Hello"
     assert response.json()["gateway"]["provider"] == "p"
+    assert response.json()["metadata"] == {"request": "demo"}
 
 
 def test_moderations_api_is_feature_flagged_and_classifies_without_policy_blocking(tmp_path, monkeypatch):
@@ -202,7 +203,38 @@ def test_moderations_api_is_feature_flagged_and_classifies_without_policy_blocki
     assert response.json()["results"][0]["flagged"] is False
     assert response.json()["results"][1]["flagged"] is True
     assert response.json()["results"][1]["categories"]["self-harm"] is True
-    assert response.json()["metadata"] == {"request": "demo"}
+
+
+def test_audio_speech_is_feature_flagged_and_returns_binary(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROVIDER_KEY", "secret")
+    disabled_path = tmp_path / "audio-disabled.yaml"
+    disabled_path.write_text(
+        "providers:\n  - name: p\n    base_url: https://example.test/v1\n"
+        "    api_key_env: PROVIDER_KEY\n    models:\n"
+        "      - {name: speak, upstream_model: tts, capabilities: [audio_speech]}\n",
+        encoding="utf-8",
+    )
+    with TestClient(create_app(str(disabled_path)), raise_server_exceptions=False) as client:
+        assert client.post("/v1/audio/speech", json={}).status_code == 404
+
+    config_path = tmp_path / "audio.yaml"
+    config_path.write_text(
+        "features:\n  audio_api: true\nproviders:\n  - name: p\n"
+        "    base_url: https://example.test/v1\n    api_key_env: PROVIDER_KEY\n"
+        "    models:\n      - {name: speak, upstream_model: tts, capabilities: [audio_speech]}\n",
+        encoding="utf-8",
+    )
+    with TestClient(create_app(str(config_path)), raise_server_exceptions=False) as client:
+        async def speech_for(_payload, _tenant_id, _limits):
+            return b"audio", "p", "tts", {"content-type": "audio/mpeg"}
+
+        client.app.state.router.speech_for = speech_for
+        response = client.post("/v1/audio/speech", json={
+            "model": "speak", "input": "Hello", "voice": "alloy",
+        })
+    assert response.status_code == 200
+    assert response.content == b"audio"
+    assert response.headers["content-type"].startswith("audio/mpeg")
 
 
 def test_embeddings_api_is_feature_flagged_and_uses_router(tmp_path, monkeypatch):

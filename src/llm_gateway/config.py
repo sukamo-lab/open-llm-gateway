@@ -32,7 +32,9 @@ class ModelConfig(StrictModel):
     upstream_model: str
     reasoning: bool = False
     priority: int = 100
-    capabilities: set[Literal["chat", "reasoning", "vision", "tools", "json", "embeddings"]] = Field(
+    capabilities: set[Literal[
+        "chat", "reasoning", "vision", "tools", "json", "embeddings", "audio_speech",
+    ]] = Field(
         default_factory=lambda: {"chat", "vision", "tools", "json"}
     )
     input_cost_per_million: float = Field(default=0, ge=0)
@@ -52,6 +54,7 @@ class ProviderConfig(StrictModel):
     base_url: str
     chat_completions_path: str = "/chat/completions"
     embeddings_path: str = "/embeddings"
+    audio_speech_path: str = "/audio/speech"
     api_key_env: str | None = None
     api_key_file: str | None = None
     api_key_value: str | None = None
@@ -63,6 +66,7 @@ class ProviderConfig(StrictModel):
     headers: dict[str, str] = Field(default_factory=dict)
     request_defaults: dict[str, object] = Field(default_factory=dict)
     embeddings_request_defaults: dict[str, object] = Field(default_factory=dict)
+    audio_speech_request_defaults: dict[str, object] = Field(default_factory=dict)
     limits: list[Limit] = Field(default_factory=list)
     max_concurrency: int = Field(default=10, gt=0)
     failure_threshold: int = Field(default=3, gt=0)
@@ -114,6 +118,7 @@ class GatewayConfig(StrictModel):
     responses: "ResponsesConfig" = Field(default_factory=lambda: ResponsesConfig())
     embeddings: "EmbeddingsConfig" = Field(default_factory=lambda: EmbeddingsConfig())
     moderations_api: "ModerationsAPIConfig" = Field(default_factory=lambda: ModerationsAPIConfig())
+    audio: "AudioConfig" = Field(default_factory=lambda: AudioConfig())
     features: "FeatureConfig" = Field(default_factory=lambda: FeatureConfig())
     providers: list[ProviderConfig]
 
@@ -139,6 +144,7 @@ class GatewayConfig(StrictModel):
                 "responses_api": False,
                 "embeddings_api": False,
                 "moderations_api": False,
+                "audio_api": False,
             },
             "multi": {
                 "authentication": True, "admin_api": True, "managed_keys": True,
@@ -154,6 +160,7 @@ class GatewayConfig(StrictModel):
                 "responses_api": False,
                 "embeddings_api": False,
                 "moderations_api": False,
+                "audio_api": False,
             },
         }[self.mode]
         for name, default in defaults.items():
@@ -234,6 +241,12 @@ class GatewayConfig(StrictModel):
             for model in provider.models
         ):
             issues.append(("ERROR", "embeddings API has no enabled embeddings-capable model"))
+        if self.features.audio_api and not any(
+            "audio_speech" in model.capabilities
+            for provider in self.providers if provider.enabled
+            for model in provider.models
+        ):
+            issues.append(("ERROR", "audio API has no enabled speech-capable model"))
         endpoint = self.telemetry.endpoint()
         if self.features.tracing and endpoint and endpoint.startswith("http://"):
             issues.append(("WARN", "OpenTelemetry exporter endpoint is not encrypted"))
@@ -491,6 +504,14 @@ class ModerationsAPIConfig(StrictModel):
         return self
 
 
+class AudioConfig(StrictModel):
+    max_input_characters: int = Field(default=4096, ge=1, le=100_000)
+    response_formats: set[Literal["mp3", "opus", "aac", "flac", "wav", "pcm"]] = Field(
+        default_factory=lambda: {"mp3", "opus", "aac", "flac", "wav", "pcm"}
+    )
+    max_response_bytes: int = Field(default=25_000_000, ge=1024, le=500_000_000)
+
+
 class FeatureConfig(StrictModel):
     authentication: bool | None = None
     admin_api: bool | None = None
@@ -511,6 +532,7 @@ class FeatureConfig(StrictModel):
     responses_api: bool | None = None
     embeddings_api: bool | None = None
     moderations_api: bool | None = None
+    audio_api: bool | None = None
 
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")

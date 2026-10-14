@@ -10,6 +10,7 @@ It has two explicit profiles: a minimal single-user mode and a fully managed mul
 - Feature-flagged Responses API compatibility for non-streaming text, vision, reasoning, JSON, and function tools.
 - Feature-flagged embeddings API with batching, token-array input, quotas, retries, and free-first failover.
 - Feature-flagged OpenAI-compatible text moderation API with bounded batches and no provider call.
+- Feature-flagged text-to-speech API with capability routing, quotas, retries, and free-first failover.
 - Capability-aware routing for chat, reasoning, vision, tools, and JSON workloads.
 - Strict free-before-paid ordering with optional prohibition of paid fallback.
 - Persistent atomic rolling quotas for requests and tokens.
@@ -89,6 +90,8 @@ $body = @{ model = "gateway-moderation-latest"; input = @("Hello", "text to clas
 Invoke-RestMethod http://localhost:8000/v1/moderations `
   -Method Post -Headers $headers -ContentType application/json -Body $body
 ```
+
+For text-to-speech, enable `features.audio_api`, configure an `audio_speech`-capable model, and call `POST /v1/audio/speech`.
 
 ## Routing behavior
 

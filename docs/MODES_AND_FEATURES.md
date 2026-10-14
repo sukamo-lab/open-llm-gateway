@@ -26,6 +26,7 @@ features:
   responses_api: false
   embeddings_api: false
   moderations_api: false
+  audio_api: false
 ```
 
 Single-user defaults require only a provider key, bind to localhost, do not initialize tenant/key infrastructure, and select the no-database `NullQuotaStore` hot path. Provider quotas or accounting can be enabled independently when desired.
@@ -60,6 +61,7 @@ features:
   responses_api: false
   embeddings_api: false
   moderations_api: false
+  audio_api: false
 ```
 
 Multi-user defaults enable tenant identities, expiring consumer keys, tenant/provider limits, accounting, costs, metrics, and circuit breaking. PostgreSQL is recommended for multiple replicas.
@@ -89,6 +91,7 @@ Disabled features are not merely hidden:
 - `responses_api: false` removes `/v1/responses` from routing and OpenAPI. It is opt-in in both modes while compatibility coverage expands.
 - `embeddings_api: false` removes `/v1/embeddings` from routing and OpenAPI and initializes no endpoint-specific state.
 - `moderations_api: false` removes `/v1/moderations` from routing and OpenAPI and does not construct its classification engine. The endpoint is opt-in in both modes.
+- `audio_api: false` removes `/v1/audio/speech` from routing and OpenAPI and adds no audio-specific request processing.
 - `authentication: false` removes consumer authentication checks, but is accepted only on a localhost bind.
 
 Invalid dependency combinations fail configuration validation: managed keys require authentication and the admin API; tenant quotas require managed keys; cost tracking requires accounting.

@@ -313,3 +313,30 @@ def test_embedding_candidates_exclude_chat_only_models(tmp_path, monkeypatch):
         "auto", False, required_capabilities={"embeddings"}
     )] == ["embed"]
 
+
+@pytest.mark.asyncio
+async def test_speech_uses_capability_path_alias_and_binary_response(tmp_path, monkeypatch):
+    monkeypatch.setenv("FREE_KEY", "secret")
+    config = make_config(tmp_path, [provider(
+        "free", "free", "FREE_KEY",
+        [{"name": "speak", "upstream_model": "vendor-tts", "capabilities": ["audio_speech"]}],
+    )])
+    config.features.audio_api = True
+    seen = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["body"] = request.content
+        return httpx.Response(200, content=b"audio-bytes", headers={"content-type": "audio/mpeg"})
+
+    quota = QuotaStore(config.database)
+    await quota.initialize()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        content, selected, upstream, _headers = await GatewayRouter(config, quota, client).speech_for({
+            "model": "speak", "input": "hello", "voice": "alloy", "response_format": "mp3",
+        })
+    assert seen["path"].endswith("/v1/audio/speech")
+    assert b'"model":"vendor-tts"' in seen["body"]
+    assert content == b"audio-bytes"
+    assert (selected, upstream) == ("free", "vendor-tts")
+

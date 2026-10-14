@@ -78,6 +78,7 @@ features:
   responses_api: false
   embeddings_api: false
   moderations_api: false
+  audio_api: false
 server:
   host: 127.0.0.1
   port: 8000

@@ -220,3 +220,15 @@ def test_moderations_api_is_opt_in_and_model_aliases_are_validated():
             "providers": [provider],
         })
 
+
+def test_audio_api_is_opt_in_and_requires_capable_model():
+    provider = {
+        "name": "p", "base_url": "https://example.test/v1", "api_key_value": "key",
+        "models": [{"name": "fast", "upstream_model": "model"}],
+    }
+    config = GatewayConfig.model_validate({
+        "features": {"audio_api": True}, "providers": [provider],
+    })
+    assert any("speech-capable" in message for _severity, message in config.diagnostics())
+    assert GatewayConfig.model_validate({"providers": [provider]}).features.audio_api is False
+
