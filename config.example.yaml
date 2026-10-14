@@ -21,6 +21,7 @@ features:
   moderation: false
   prompt_injection: false
   responses_api: false
+  embeddings_api: false
 
 server:
   host: 0.0.0.0
@@ -133,6 +134,13 @@ responses:
   max_input_items: 1000
   max_tools: 128
   max_metadata_entries: 16
+
+embeddings:
+  max_inputs: 2048
+  max_input_characters: 1000000
+  max_token_ids: 1000000
+  max_dimensions: 65536
+  allow_token_arrays: true
 
 providers:
   - name: google-free

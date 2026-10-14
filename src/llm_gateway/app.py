@@ -473,6 +473,7 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             "endpoints": {
                 "health": "/health", "ready": "/ready", "models": "/v1/models",
                 **({"responses": "/v1/responses"} if config.features.responses_api else {}),
+                **({"embeddings": "/v1/embeddings"} if config.features.embeddings_api else {}),
                 "docs": "/docs" if config.server.docs_enabled else None,
             },
         }
@@ -993,6 +994,94 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         response_body["parallel_tool_calls"] = payload.get("parallel_tool_calls", True)
         return JSONResponse(content=response_body, status_code=status_code, headers=headers)
 
+    @app.post("/v1/embeddings")
+    async def embeddings(request: Request):
+        context = await require_api(request)
+        if request.headers.get("idempotency-key"):
+            raise HTTPException(400, "Idempotency-Key is not supported for embeddings requests")
+        try:
+            raw_payload = await request.json()
+        except ValueError as exc:
+            raise HTTPException(400, "request body must contain valid JSON") from exc
+        if not isinstance(raw_payload, dict):
+            raise HTTPException(400, "request body must be a JSON object")
+        from .embeddings_api import EmbeddingsValidationError, validate_embeddings_payload
+
+        try:
+            payload = validate_embeddings_payload(raw_payload, config.embeddings)
+        except EmbeddingsValidationError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        policy_metadata: dict[str, object] = {}
+        if moderation_processor is not None and config.moderation.scan in {"input", "both"}:
+            from .moderation import ModerationBlocked, ModerationError
+
+            try:
+                report = moderation_processor.process_request(payload)
+                await metrics.moderation(
+                    "input", report.action, "flagged" if report.flagged else "clean"
+                )
+                policy_metadata["moderation"] = {"input": report.metadata()}
+                if report.flagged:
+                    logger.info(
+                        "Moderation policy flagged embeddings input action=%s findings=%s categories=%s",
+                        report.action, report.findings, ",".join(report.categories),
+                    )
+            except ModerationBlocked as exc:
+                await metrics.moderation("input", "block", "blocked")
+                logger.warning(
+                    "Moderation policy blocked embeddings input findings=%s categories=%s",
+                    exc.report.findings, ",".join(exc.report.categories),
+                )
+                raise HTTPException(400, "request blocked by moderation policy") from exc
+            except ModerationError as exc:
+                await metrics.moderation("input", config.moderation.action, "error")
+                if config.moderation.failure_mode == "closed":
+                    raise HTTPException(422, "request could not be evaluated by moderation policy") from exc
+                policy_metadata["moderation"] = {
+                    "input": {"action": "bypass", "reason": "evaluation_error"}
+                }
+        if pii_processor is not None and config.pii.scan in {"input", "both"}:
+            from .pii import PIIBlocked, PIIScanError
+
+            try:
+                payload, report = pii_processor.process_request(payload)
+                await metrics.pii(
+                    "input", report.action, "matched" if report.matches else "clean"
+                )
+                policy_metadata["pii"] = {"input": report.metadata()}
+                if report.matches:
+                    logger.info(
+                        "PII policy processed embeddings input action=%s matches=%s types=%s",
+                        report.action, report.matches, ",".join(report.types),
+                    )
+            except PIIBlocked as exc:
+                await metrics.pii("input", "block", "blocked")
+                logger.warning(
+                    "PII policy blocked embeddings input matches=%s types=%s",
+                    exc.report.matches, ",".join(exc.report.types),
+                )
+                raise HTTPException(400, "request blocked by PII policy") from exc
+            except PIIScanError as exc:
+                await metrics.pii("input", config.pii.action, "error")
+                if config.pii.failure_mode == "closed":
+                    raise HTTPException(422, "request could not be evaluated by PII policy") from exc
+                policy_metadata["pii"] = {
+                    "input": {"action": "bypass", "reason": "scan_error"}
+                }
+        router: GatewayRouter = request.app.state.router
+        tenant_limits = context.limits if config.features.tenant_quotas else ()
+        try:
+            body, _provider, _upstream_model = await router.embed_for(
+                payload, context.tenant_id, tenant_limits
+            )
+        except QuotaExceeded as exc:
+            raise HTTPException(429, str(exc)) from exc
+        except NoModelAvailable as exc:
+            raise HTTPException(503, str(exc)) from exc
+        if policy_metadata:
+            body.setdefault("gateway", {})["policies"] = policy_metadata
+        return body
+
     disabled_paths: set[str] = set()
     if not config.features.admin_api:
         disabled_paths.update(
@@ -1013,6 +1102,8 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         disabled_paths.add("/metrics")
     if not config.features.responses_api:
         disabled_paths.add("/v1/responses")
+    if not config.features.embeddings_api:
+        disabled_paths.add("/v1/embeddings")
     app.router.routes = [
         route for route in app.router.routes
         if getattr(route, "path", None) not in disabled_paths

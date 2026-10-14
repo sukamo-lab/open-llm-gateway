@@ -47,6 +47,28 @@ Supported request behavior includes string or message-array input, instructions,
 
 The adapter returns response objects with message and function-call output items, usage, incomplete status for token limits, and the gateway's provider metadata. It deliberately rejects streaming, background mode, hosted storage, files, conversations, prompts, and previous-response chaining rather than silently changing their semantics. These limitations remain recorded under `API-RESP-001`; use `/v1/chat/completions` for streaming until Responses SSE translation is implemented and compatibility-tested.
 
+## Embeddings API
+
+`features.embeddings_api` exposes `POST /v1/embeddings`; it is disabled by default in both modes and removed from routing and OpenAPI when disabled. Eligible models must declare `capabilities: [embeddings]`. Each provider may override `embeddings_path`, which defaults to `/embeddings` relative to its OpenAI-compatible `base_url`, and may set embedding-only defaults under `embeddings_request_defaults` without contaminating chat requests.
+
+The endpoint supports non-empty text, text batches, token arrays, `float` or `base64` encoding, optional dimensions, user identifiers, and the diagnostic provider override when globally allowed. `embeddings.max_inputs`, `max_input_characters`, `max_token_ids`, and `max_dimensions` bound work before routing; `allow_token_arrays` can prohibit pre-tokenized input.
+
+```yaml
+features:
+  embeddings_api: true
+providers:
+  - name: example
+    base_url: https://provider.example/v1
+    api_key_env: EXAMPLE_API_KEY
+    models:
+      - name: embed
+        upstream_model: provider-embedding-model
+        capabilities: [embeddings]
+        input_cost_per_million: 0.10
+```
+
+Embedding requests use the standard free-before-paid candidate order, atomic quota reservation, input-price accounting, concurrency limits, retries, failover, circuit breakers, tracing, and provider/model metrics. Input PII and moderation policies apply when enabled. Prompt-injection policy does not apply because embeddings do not execute instructions. Exact response caching and `Idempotency-Key` are not currently supported and idempotency headers are rejected explicitly.
+
 ## Structured logging
 
 `features.structured_logging` enables newline-delimited JSON logs. It defaults off in single-user mode and on in multi-user mode. When disabled, request correlation and provider log calls are absent from the hot path.

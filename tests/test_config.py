@@ -187,3 +187,22 @@ def test_responses_api_is_opt_in_and_limits_are_validated():
     with pytest.raises(ValidationError):
         GatewayConfig.model_validate({"responses": {"max_input_items": 0}, "providers": [provider]})
 
+
+def test_embeddings_api_is_opt_in_and_limits_are_validated():
+    provider = {
+        "name": "p", "base_url": "https://example.test/v1", "api_key_value": "key",
+        "models": [{"name": "embed", "upstream_model": "model", "capabilities": ["embeddings"]}],
+    }
+    assert GatewayConfig.model_validate({"mode": "single", "providers": [provider]}).features.embeddings_api is False
+    assert GatewayConfig.model_validate({"mode": "multi", "providers": [provider]}).features.embeddings_api is False
+    with pytest.raises(ValidationError):
+        GatewayConfig.model_validate({"embeddings": {"max_inputs": 0}, "providers": [provider]})
+    chat_only = {**provider, "models": [{"name": "chat", "upstream_model": "model"}]}
+    config = GatewayConfig.model_validate({
+        "features": {"embeddings_api": True}, "providers": [chat_only],
+    })
+    assert any(
+        severity == "ERROR" and "embeddings-capable" in message
+        for severity, message in config.diagnostics()
+    )
+
