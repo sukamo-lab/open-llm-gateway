@@ -109,6 +109,7 @@ class GatewayConfig(StrictModel):
     pii: "PIIConfig" = Field(default_factory=lambda: PIIConfig())
     moderation: "ModerationConfig" = Field(default_factory=lambda: ModerationConfig())
     prompt_injection: "PromptInjectionConfig" = Field(default_factory=lambda: PromptInjectionConfig())
+    responses: "ResponsesConfig" = Field(default_factory=lambda: ResponsesConfig())
     features: "FeatureConfig" = Field(default_factory=lambda: FeatureConfig())
     providers: list[ProviderConfig]
 
@@ -131,6 +132,7 @@ class GatewayConfig(StrictModel):
                 "pii_detection": False,
                 "moderation": False,
                 "prompt_injection": False,
+                "responses_api": False,
             },
             "multi": {
                 "authentication": True, "admin_api": True, "managed_keys": True,
@@ -143,6 +145,7 @@ class GatewayConfig(StrictModel):
                 "pii_detection": False,
                 "moderation": False,
                 "prompt_injection": False,
+                "responses_api": False,
             },
         }[self.mode]
         for name, default in defaults.items():
@@ -443,6 +446,12 @@ class PromptInjectionConfig(StrictModel):
         return self
 
 
+class ResponsesConfig(StrictModel):
+    max_input_items: int = Field(default=1_000, ge=1, le=10_000)
+    max_tools: int = Field(default=128, ge=0, le=1_000)
+    max_metadata_entries: int = Field(default=16, ge=0, le=100)
+
+
 class FeatureConfig(StrictModel):
     authentication: bool | None = None
     admin_api: bool | None = None
@@ -460,6 +469,7 @@ class FeatureConfig(StrictModel):
     pii_detection: bool | None = None
     moderation: bool | None = None
     prompt_injection: bool | None = None
+    responses_api: bool | None = None
 
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")

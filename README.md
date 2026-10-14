@@ -7,6 +7,7 @@ It has two explicit profiles: a minimal single-user mode and a fully managed mul
 ## Highlights
 
 - OpenAI-compatible chat completions, model listing, and SSE streaming.
+- Feature-flagged Responses API compatibility for non-streaming text, vision, reasoning, JSON, and function tools.
 - Capability-aware routing for chat, reasoning, vision, tools, and JSON workloads.
 - Strict free-before-paid ordering with optional prohibition of paid fallback.
 - Persistent atomic rolling quotas for requests and tokens.
@@ -60,6 +61,14 @@ $body = @{
   messages = @(@{ role = "user"; content = "Hello" })
 } | ConvertTo-Json -Depth 10
 Invoke-RestMethod http://localhost:8000/v1/chat/completions `
+  -Method Post -Headers $headers -ContentType application/json -Body $body
+```
+
+To use the Responses compatibility endpoint, enable `features.responses_api` and send `input` instead of `messages`:
+
+```powershell
+$body = @{ model = "auto"; input = "Hello" } | ConvertTo-Json
+Invoke-RestMethod http://localhost:8000/v1/responses `
   -Method Post -Headers $headers -ContentType application/json -Body $body
 ```
 

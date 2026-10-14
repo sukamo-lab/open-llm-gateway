@@ -18,6 +18,7 @@ All notable product changes are recorded here. The project follows [Semantic Ver
 - Opt-in pluggable PII detection, redaction, blocking, bounded audit metrics, and explicit streaming policy.
 - Opt-in provider-neutral moderation policies with local baseline rules, custom terms, and safe audit metrics.
 - Opt-in prompt-injection risk scoring, warning, blocking, and operator-designated safe-model routing.
+- Feature-flagged Responses API adapter over the existing governed chat execution pipeline.
 
 ## [0.5.0] - 2026-10-13
 

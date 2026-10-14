@@ -78,6 +78,22 @@ def test_prompt_injection_route_only_selects_marked_safe_models(tmp_path, monkey
     ] == ["safe"]
 
 
+def test_gateway_request_context_is_never_forwarded_upstream(tmp_path, monkeypatch):
+    monkeypatch.setenv("FREE_KEY", "secret")
+    config = make_config(tmp_path, [
+        provider("free", "free", "FREE_KEY", [
+            {"name": "chat", "upstream_model": "free-chat"},
+        ]),
+    ])
+    router = GatewayRouter(config, QuotaStore(config.database), httpx.AsyncClient())
+    candidate = router.candidates("chat", False)[0]
+    upstream = router._upstream_payload(candidate, {
+        "model": "chat", "messages": [],
+        "_gateway_request_context": {"api": "responses", "metadata": {"key": "value"}},
+    }, False)
+    assert "_gateway_request_context" not in upstream
+
+
 @pytest.mark.asyncio
 async def test_retryable_response_fails_over(tmp_path, monkeypatch):
     monkeypatch.setenv("FREE_KEY", "secret")

@@ -506,5 +506,8 @@ class GatewayRouter:
         result["stream"] = stream
         result.pop("reasoning", None)
         result.pop("provider", None)
+        for key in tuple(result):
+            if key.startswith("_gateway_"):
+                result.pop(key, None)
         return result
 
