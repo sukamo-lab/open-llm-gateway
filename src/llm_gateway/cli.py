@@ -71,6 +71,7 @@ features:
   structured_logging: false
   idempotency: false
   exact_cache: false
+  tracing: false
 server:
   host: 127.0.0.1
   port: 8000

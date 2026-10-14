@@ -29,6 +29,8 @@ When idempotency is enabled, monitor database growth and choose a TTL appropriat
 
 For exact caching, use the memory backend only for a single process. Use PostgreSQL or Redis for multiple replicas, monitor hit ratio and retained bytes at the backend, and increment `cache.namespace` for an immediate logical invalidation. Provider/model configuration changes invalidate keys automatically. Redis must enforce its own authentication, TLS, network policy, memory limit, and eviction policy.
 
+For tracing, send OTLP/HTTP to a local or regional OpenTelemetry Collector rather than directly coupling the gateway to a monitoring vendor. Protect collector ingestion with TLS and authentication, bound exporter queues, and select a sampling ratio appropriate for traffic. Export occurs in batches off the request path; shutdown attempts to flush queued spans. Keep tenant IDs disabled unless the monitoring destination is approved for that metadata.
+
 ## Production checklist
 
 1. Copy `config.example.yaml` and `.env.example`; keep both real files out of source control.

@@ -13,6 +13,7 @@ All notable product changes are recorded here. The project follows [Semantic Ver
 - Persistent tenant-scoped idempotency for non-streaming chat completions.
 - Reproducible, attested, keylessly signed release workflow.
 - Tenant-isolated exact response caching with memory, SQLite, PostgreSQL, and Redis backends.
+- OpenTelemetry tracing with W3C propagation, OTLP export, and log correlation.
 
 ## [0.5.0] - 2026-10-13
 

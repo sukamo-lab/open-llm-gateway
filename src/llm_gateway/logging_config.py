@@ -52,6 +52,15 @@ class JsonFormatter(logging.Formatter):
             event["request.id"] = request_id
         if tenant_id:
             event["tenant.id"] = tenant_id
+        try:
+            from opentelemetry import trace
+
+            span_context = trace.get_current_span().get_span_context()
+            if span_context.is_valid:
+                event["trace.id"] = f"{span_context.trace_id:032x}"
+                event["span.id"] = f"{span_context.span_id:016x}"
+        except ImportError:
+            pass
         for field in LOG_FIELDS:
             value = getattr(record, field, None)
             if value is not None:

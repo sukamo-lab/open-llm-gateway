@@ -184,6 +184,19 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             json.dumps(routing_material, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
         cache_available = True
+    telemetry = None
+    if config.features.tracing:
+        try:
+            from .telemetry import Telemetry
+
+            telemetry = Telemetry(config.telemetry)
+        except Exception as exc:
+            if config.telemetry.failure_mode == "closed":
+                raise
+            logger.error(
+                "OpenTelemetry initialization failed; continuing without tracing error_type=%s",
+                type(exc).__name__,
+            )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -215,7 +228,7 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             keepalive_expiry=config.routing.http_keepalive_expiry_seconds,
         )
         async with httpx.AsyncClient(follow_redirects=True, limits=limits) as client:
-            app.state.router = GatewayRouter(config, quota, client, metrics)
+            app.state.router = GatewayRouter(config, quota, client, metrics, telemetry)
             yield
         close = getattr(shared_store or quota, "close", None)
         if close:
@@ -224,6 +237,13 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             await idempotency_store.close()
         if cache_store is not None:
             await cache_store.close()
+        if telemetry is not None:
+            try:
+                await asyncio.to_thread(telemetry.shutdown)
+            except Exception as exc:
+                if config.telemetry.failure_mode == "closed":
+                    raise
+                logger.error("OpenTelemetry shutdown failed error_type=%s", type(exc).__name__)
 
     app = FastAPI(
         title="LLM Gateway", version=__version__, lifespan=lifespan,
@@ -273,6 +293,8 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             request.state.tenant_id = context.tenant_id
             if config.features.structured_logging:
                 bind_tenant(context.tenant_id)
+            if telemetry is not None:
+                telemetry.set_tenant(context.tenant_id)
             return context
         token = bearer(request)
         for key in config.auth.api_keys():
@@ -282,6 +304,8 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                 request.state.tenant_id = context.tenant_id
                 if config.features.structured_logging:
                     bind_tenant(context.tenant_id)
+                if telemetry is not None:
+                    telemetry.set_tenant(context.tenant_id)
                 return context
         if config.features.managed_keys and identities is not None and token:
             context = await identities.authenticate(token)
@@ -289,6 +313,8 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                 request.state.tenant_id = context.tenant_id
                 if config.features.structured_logging:
                     bind_tenant(context.tenant_id)
+                if telemetry is not None:
+                    telemetry.set_tenant(context.tenant_id)
                 return context
         raise HTTPException(401, "invalid gateway API key", headers={"WWW-Authenticate": "Bearer"})
 
@@ -307,10 +333,16 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         request_id = supplied_id if supplied_id and len(supplied_id) <= 128 and supplied_id.isprintable() else str(uuid.uuid4())
         request.state.request_id = request_id
         context_tokens = begin_request(request_id) if config.features.structured_logging else None
+        trace_handle = (
+            telemetry.start_request(request.headers, request.method, request.url.path, request_id)
+            if telemetry is not None else None
+        )
+        trace_status, trace_error = 500, None
         try:
             try:
                 response = await call_next(request)
-            except Exception:
+            except Exception as exc:
+                trace_error = type(exc).__name__
                 elapsed = (time.monotonic() - started) * 1000
                 if config.features.metrics:
                     await metrics.request(request.url.path, 500, elapsed)
@@ -326,6 +358,7 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             response.headers["X-Request-ID"] = request_id
             response.headers["X-Content-Type-Options"] = "nosniff"
             elapsed = (time.monotonic() - started) * 1000 if instrumented else 0
+            trace_status = response.status_code
             if config.features.metrics:
                 await metrics.request(request.url.path, response.status_code, elapsed)
             should_log = (
@@ -342,6 +375,8 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                 )
             return response
         finally:
+            if telemetry is not None:
+                telemetry.finish_request(trace_handle, trace_status, trace_error)
             if context_tokens is not None:
                 end_request(context_tokens)
 

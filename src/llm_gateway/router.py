@@ -40,12 +40,13 @@ class Candidate:
 class GatewayRouter:
     def __init__(
         self, config: GatewayConfig, quota: QuotaStore, client: httpx.AsyncClient,
-        metrics: Metrics | None = None,
+        metrics: Metrics | None = None, telemetry=None,
     ):
         self.config = config
         self.quota = quota
         self.client = client
         self.metrics = metrics or Metrics()
+        self.telemetry = telemetry
         self.log_provider_attempts = bool(
             config.features.structured_logging and config.observability.log_provider_attempts
         )
@@ -354,6 +355,13 @@ class GatewayRouter:
             if remaining is not None and remaining <= 0:
                 break
             timeout = min(candidate.provider.timeout_seconds, remaining) if remaining is not None else candidate.provider.timeout_seconds
+            trace_handle = (
+                self.telemetry.start_provider(
+                    candidate.provider.name, candidate.model.name,
+                    candidate.model.upstream_model, attempt,
+                )
+                if self.telemetry is not None else None
+            )
             try:
                 response = await self.client.post(
                     self._url(candidate.provider),
@@ -361,6 +369,8 @@ class GatewayRouter:
                     json=self._upstream_payload(candidate, payload, False),
                     timeout=timeout,
                 )
+                if trace_handle is not None:
+                    self.telemetry.finish_provider(trace_handle, status_code=response.status_code)
                 if response.status_code not in RETRY_STATUS or attempt == routing.retry_attempts:
                     return response, attempt
                 delay = self._retry_delay(response, attempt)
@@ -373,6 +383,8 @@ class GatewayRouter:
                                "retry_delay_seconds": round(delay, 3), "outcome": "retry"},
                     )
             except httpx.HTTPError as exc:
+                if trace_handle is not None:
+                    self.telemetry.finish_provider(trace_handle, error_type=type(exc).__name__)
                 last_error = exc
                 if attempt == routing.retry_attempts:
                     raise

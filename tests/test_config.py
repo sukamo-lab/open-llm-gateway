@@ -75,3 +75,16 @@ def test_exact_cache_is_opt_in_and_redis_requires_url(monkeypatch):
             "providers": [provider],
         })
 
+
+def test_tracing_is_opt_in_and_batch_must_fit_queue():
+    provider = {
+        "name": "p", "base_url": "https://example.test/v1", "api_key_value": "key",
+        "models": [{"name": "fast", "upstream_model": "model"}],
+    }
+    assert GatewayConfig.model_validate({"mode": "multi", "providers": [provider]}).features.tracing is False
+    with pytest.raises(ValidationError, match="max_export_batch_size"):
+        GatewayConfig.model_validate({
+            "telemetry": {"max_queue_size": 10, "max_export_batch_size": 11},
+            "providers": [provider],
+        })
+
