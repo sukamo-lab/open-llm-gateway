@@ -266,6 +266,34 @@ def test_image_generations_are_feature_flagged_and_use_router(tmp_path, monkeypa
     assert response.json()["gateway"]["provider"] == "p"
 
 
+def test_model_discovery_is_feature_flagged_and_reports_drift(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROVIDER_KEY", "secret")
+    base = (
+        "providers:\n  - name: p\n    base_url: https://example.test/v1\n"
+        "    api_key_env: PROVIDER_KEY\n    models:\n"
+        "      - {name: fast, upstream_model: model-old}\n"
+    )
+    disabled = tmp_path / "discovery-disabled.yaml"
+    disabled.write_text("features:\n  admin_api: true\n" + base, encoding="utf-8")
+    with TestClient(create_app(str(disabled)), raise_server_exceptions=False) as client:
+        assert client.post("/admin/model-discovery", json={}).status_code == 404
+
+    enabled = tmp_path / "discovery-enabled.yaml"
+    enabled.write_text(
+        "features:\n  admin_api: true\n  model_discovery: true\n" + base,
+        encoding="utf-8",
+    )
+    with TestClient(create_app(str(enabled)), raise_server_exceptions=False) as client:
+        async def discover(_gateway, _client, _requested=None):
+            return [{"provider": "p", "status": "ok", "unconfigured": ["model-new"]}]
+
+        import llm_gateway.model_discovery as discovery_module
+        monkeypatch.setattr(discovery_module, "discover_models", discover)
+        response = client.post("/admin/model-discovery", json={})
+    assert response.status_code == 200
+    assert response.json()["providers"][0]["unconfigured"] == ["model-new"]
+
+
 def test_embeddings_api_is_feature_flagged_and_uses_router(tmp_path, monkeypatch):
     monkeypatch.setenv("PROVIDER_KEY", "secret")
     disabled_config = tmp_path / "embeddings-disabled.yaml"

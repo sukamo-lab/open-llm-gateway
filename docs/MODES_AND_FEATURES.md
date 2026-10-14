@@ -28,6 +28,7 @@ features:
   moderations_api: false
   audio_api: false
   images_api: false
+  model_discovery: false
 ```
 
 Single-user defaults require only a provider key, bind to localhost, do not initialize tenant/key infrastructure, and select the no-database `NullQuotaStore` hot path. Provider quotas or accounting can be enabled independently when desired.
@@ -64,6 +65,7 @@ features:
   moderations_api: false
   audio_api: false
   images_api: false
+  model_discovery: false
 ```
 
 Multi-user defaults enable tenant identities, expiring consumer keys, tenant/provider limits, accounting, costs, metrics, and circuit breaking. PostgreSQL is recommended for multiple replicas.
@@ -95,6 +97,7 @@ Disabled features are not merely hidden:
 - `moderations_api: false` removes `/v1/moderations` from routing and OpenAPI and does not construct its classification engine. The endpoint is opt-in in both modes.
 - `audio_api: false` removes `/v1/audio/speech` from routing and OpenAPI and adds no audio-specific request processing.
 - `images_api: false` removes `/v1/images/generations` from routing and OpenAPI and adds no image-specific request processing.
+- `model_discovery: false` removes `/admin/model-discovery` and performs no catalog requests. Discovery also requires `admin_api`.
 - `authentication: false` removes consumer authentication checks, but is accepted only on a localhost bind.
 
 Invalid dependency combinations fail configuration validation: managed keys require authentication and the admin API; tenant quotas require managed keys; cost tracking requires accounting.

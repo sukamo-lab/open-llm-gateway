@@ -134,6 +134,24 @@ providers:
 
 The endpoint accepts a prompt plus optional model, count, quality, size, style, response format, and user identifier. It validates the returned image count and requires every result to contain the requested URL or base64 field. Oversized and malformed upstream responses trigger provider failover. Requests use normal free-before-paid selection, quotas, concurrency, retries, circuits, tracing, and metrics. Idempotency, prompt governance, image edits/variations, direct binary delivery, provider compatibility CI, and image-specific billing remain pending.
 
+## Model discovery
+
+`features.model_discovery` exposes the administrator-only `POST /admin/model-discovery` endpoint and requires `features.admin_api`. It is disabled by default and performs no background work. Each enabled provider uses `models_path` (default `/models`) when `discovery_enabled` is true.
+
+```yaml
+features:
+  admin_api: true
+  model_discovery: true
+model_discovery:
+  allow_patterns: ["openai/*", "meta/*"]
+  deny_patterns: ["*-preview", "*-deprecated"]
+  max_models_per_provider: 10000
+  max_concurrency: 8
+  approval_mode: report_only
+```
+
+The response reports eligible discovered IDs, eligible but unconfigured IDs, and configured upstream IDs absent from the current catalog. Catalog size, identifier length, selected-provider count, and parallel requests are bounded. Errors are isolated per provider and upstream response bodies are never returned. Discovery is deliberately read-only: it does not invent aliases or capabilities, mutate configuration, or activate models. Scheduled discovery, approval persistence, notifications, vendor-specific pagination, and automatic configuration proposals remain pending.
+
 ## Structured logging
 
 `features.structured_logging` enables newline-delimited JSON logs. It defaults off in single-user mode and on in multi-user mode. When disabled, request correlation and provider log calls are absent from the hot path.

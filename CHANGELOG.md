@@ -23,6 +23,7 @@ All notable product changes are recorded here. The project follows [Semantic Ver
 - Feature-flagged OpenAI-compatible moderation API using bounded deterministic local text classification.
 - Feature-flagged text-to-speech API with bounded input, binary responses, and capability-aware failover.
 - Feature-flagged image generation API with bounded prompts, URL/base64 validation, and provider failover.
+- Controlled read-only upstream model discovery with bounded catalogs, filters, and drift reports.
 
 ## [0.5.0] - 2026-10-13
 

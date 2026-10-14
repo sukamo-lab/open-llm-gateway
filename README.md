@@ -12,6 +12,7 @@ It has two explicit profiles: a minimal single-user mode and a fully managed mul
 - Feature-flagged OpenAI-compatible text moderation API with bounded batches and no provider call.
 - Feature-flagged text-to-speech API with capability routing, quotas, retries, and free-first failover.
 - Feature-flagged image generation API with URL/base64 results and capability-aware failover.
+- Opt-in read-only upstream model discovery with allow/deny filters and drift reporting.
 - Capability-aware routing for chat, reasoning, vision, tools, and JSON workloads.
 - Strict free-before-paid ordering with optional prohibition of paid fallback.
 - Persistent atomic rolling quotas for requests and tokens.

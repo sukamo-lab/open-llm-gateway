@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import __version__
@@ -34,6 +34,11 @@ class TenantCreate(BaseModel):
     requests_per_minute: int | None = Field(default=None, gt=0)
     tokens_per_day: int | None = Field(default=None, gt=0)
     cost_per_30_days: float | None = Field(default=None, gt=0)
+
+
+class ModelDiscoveryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    providers: list[str] | None = Field(default=None, max_length=100)
 
 
 class KeyCreate(BaseModel):
@@ -572,6 +577,26 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         require_admin(request)
         issues = [{"severity": severity, "message": message} for severity, message in config.diagnostics()]
         return {"valid": not any(item["severity"] == "ERROR" for item in issues), "issues": issues}
+
+    @app.post("/admin/model-discovery")
+    async def model_discovery(request: Request, selection: ModelDiscoveryRequest) -> dict[str, object]:
+        require_admin(request)
+        requested = set(selection.providers) if selection.providers is not None else None
+        known = {provider.name for provider in config.providers}
+        if requested is not None:
+            if any(not name or len(name) > 120 for name in requested):
+                raise HTTPException(400, "provider names must be bounded non-empty text")
+            unknown = sorted(requested - known)
+            if unknown:
+                raise HTTPException(400, f"unknown provider: {unknown[0]}")
+        from .model_discovery import discover_models
+
+        reports = await discover_models(config, request.app.state.router.client, requested)
+        return {
+            "object": "model_discovery_report",
+            "approval_mode": config.model_discovery.approval_mode,
+            "providers": reports,
+        }
 
     @app.get("/metrics", response_class=PlainTextResponse)
     async def prometheus(request: Request) -> str:
@@ -1224,6 +1249,8 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         disabled_paths.add("/v1/audio/speech")
     if not config.features.images_api:
         disabled_paths.add("/v1/images/generations")
+    if not config.features.model_discovery:
+        disabled_paths.add("/admin/model-discovery")
     app.router.routes = [
         route for route in app.router.routes
         if getattr(route, "path", None) not in disabled_paths
