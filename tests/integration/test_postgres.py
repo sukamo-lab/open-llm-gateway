@@ -6,6 +6,7 @@ import uuid
 import pytest
 
 from llm_gateway.config import Limit, ProviderConfig
+from llm_gateway.cache import PostgresCacheStore
 from llm_gateway.idempotency import PostgresIdempotencyStore, key_hash, request_hash
 from llm_gateway.postgres import PostgresStore
 
@@ -95,5 +96,19 @@ async def test_postgres_idempotency_claim_and_replay():
         replay = await store.claim(f"tenant-{suffix}", digest, fingerprint)
         assert replay.status == "cached"
         assert replay.response == {"id": "cached"}
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_postgres_exact_cache_is_tenant_scoped():
+    store = PostgresCacheStore(postgres_dsn(), ttl_seconds=60, max_entries=100)
+    await store.initialize()
+    suffix = uuid.uuid4().hex
+    try:
+        await store.put(f"tenant-a-{suffix}", suffix, '{"id":"cached"}')
+        entry = await store.get(f"tenant-a-{suffix}", suffix)
+        assert entry and entry.response == {"id": "cached"}
+        assert await store.get(f"tenant-b-{suffix}", suffix) is None
     finally:
         await store.close()

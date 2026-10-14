@@ -59,3 +59,19 @@ def test_idempotency_mode_defaults_and_key_length_validation():
             "providers": [provider],
         })
 
+
+def test_exact_cache_is_opt_in_and_redis_requires_url(monkeypatch):
+    monkeypatch.delenv("TEST_REDIS_URL", raising=False)
+    provider = {
+        "name": "p", "base_url": "https://example.test/v1", "api_key_value": "key",
+        "models": [{"name": "fast", "upstream_model": "model"}],
+    }
+    config = GatewayConfig.model_validate({"mode": "multi", "providers": [provider]})
+    assert config.features.exact_cache is False
+    with pytest.raises(ValidationError, match="TEST_REDIS_URL"):
+        GatewayConfig.model_validate({
+            "features": {"exact_cache": True},
+            "cache": {"backend": "redis", "redis_url_env": "TEST_REDIS_URL"},
+            "providers": [provider],
+        })
+

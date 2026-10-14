@@ -86,7 +86,19 @@ features:
       - docs/CONFIGURATION.md
     notes: Configurable bounded retries, jitter, Retry-After, deadlines, and attempt metadata are implemented for non-streaming calls; streaming retry parity and executable test-suite verification remain pending.
   - {id: RES-DISTCB-001, pillar: resilience, name: Distributed circuit and concurrency coordination, status: planned, target: v1.0}
-  - {id: CACHE-EXACT-001, pillar: resilience, name: Exact tenant-isolated cache, status: planned, target: v0.7}
+  - id: CACHE-EXACT-001
+    pillar: resilience
+    name: Exact tenant-isolated cache
+    status: partial
+    target: v0.7
+    evidence:
+      - src/llm_gateway/cache.py
+      - src/llm_gateway/app.py
+      - src/llm_gateway/migrations.py
+      - tests/test_cache.py
+      - tests/integration/test_postgres.py
+      - docs/CONFIGURATION.md
+    notes: Opt-in tenant-isolated memory, SQLite, PostgreSQL, and Redis backends with bounds, bypass, and configuration-aware keys are implemented; full pytest, live PostgreSQL/Redis, metrics, and latency verification remain pending.
   - {id: CACHE-SEM-001, pillar: resilience, name: Privacy-aware semantic cache, status: planned, target: v1.0, depends_on: [CACHE-EXACT-001, API-EMBED-001]}
 
   - id: IAM-MODE-001

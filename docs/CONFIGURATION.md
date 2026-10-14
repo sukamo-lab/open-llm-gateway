@@ -63,6 +63,22 @@ Streaming requests reject `Idempotency-Key`: replaying a partially delivered SSE
 
 Cached records contain model responses and should receive the same database access controls, encryption, backup policy, and retention review as other application data. Disable the feature for workloads whose responses must not be persisted.
 
+## Exact response cache
+
+`features.exact_cache` enables tenant-isolated replay of successful, non-streaming chat responses. It is opt-in in both modes. Canonical SHA-256 cache keys include the full request, a non-secret routing-configuration signature, and `cache.namespace`; prompts are never stored in cache keys. Responses are retained, so apply appropriate encryption, access, backup, and retention controls.
+
+Backends:
+
+- `memory`: bounded LRU cache for one process; fastest and suitable for local use.
+- `database`: SQLite for one process or PostgreSQL for shared, durable replica coordination.
+- `redis`: shared low-latency cache using the URL from `redis_url_env`; Redis eviction and memory limits remain operator responsibilities.
+
+`ttl_seconds`, `max_entries`, and `max_response_bytes` bound retention. `namespace` provides an operator-controlled invalidation generation. Routing/model configuration changes automatically change the key signature. Successful misses return `X-Cache: MISS`; hits return `X-Cache: HIT` and `Age`; streams, oversized responses, and client bypasses return `X-Cache: BYPASS`.
+
+`failure_mode: open` preserves gateway availability when cache startup, reads, or writes fail and marks requests as bypassed; errors remain in operator logs. `closed` rejects requests instead and is appropriate only when policy requires guaranteed cache behavior.
+
+When `allow_client_bypass` is true, `Cache-Control: no-cache` or `no-store` bypasses both lookup and storage. Disable the feature for sensitive workloads that prohibit response retention. Cached copies omit upstream rate-limit metadata because it becomes stale immediately.
+
 Price fields are metadata expressed in USD per million tokens. Keep prices current when vendors change them.
 
 `accounting.retention_days` controls usage-row retention and must be at least 30 days so tenant rolling spend limits remain enforceable. Cleanup runs during startup.
