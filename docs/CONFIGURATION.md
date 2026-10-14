@@ -85,6 +85,30 @@ moderations_api:
 
 Requests accept one non-empty text string or an array of text strings. Images and other multimodal input types are not yet supported. Unknown fields and `Idempotency-Key` are rejected explicitly. The response follows the OpenAI text-moderation result shape and adds content-free `gateway` metadata for engine version, signal names, and finding count. Category scores are deterministic `0.0`/`1.0` rule-match indicators—not calibrated probabilities. A custom configured signal can set `flagged: true` even when no standard OpenAI category maps to it; inspect `gateway.signals` in that case.
 
+## Audio API
+
+`features.audio_api` exposes `POST /v1/audio/speech`; it is disabled by default in both modes and removed from routing and OpenAPI when disabled. Speech models declare `capabilities: [audio_speech]`. Providers may override `audio_speech_path` and `audio_speech_request_defaults`. The request supports model, input, voice, response format, speed, and optional instructions; configured limits bound input and returned audio bytes.
+
+```yaml
+features:
+  audio_api: true
+audio:
+  max_input_characters: 4096
+  response_formats: [mp3, opus, aac, flac, wav, pcm]
+  max_response_bytes: 25000000
+providers:
+  - name: speech-provider
+    base_url: https://provider.example/v1
+    api_key_env: SPEECH_API_KEY
+    audio_speech_path: /audio/speech
+    models:
+      - name: speak
+        upstream_model: provider-tts-model
+        capabilities: [audio_speech]
+```
+
+Speech requests use free-before-paid selection, quotas, concurrency limits, retries, failover, circuits, tracing, and provider metrics. Successful responses contain audio bytes and `X-Gateway-Provider`/`X-Gateway-Upstream-Model` headers. JSON/text success bodies and oversized responses are rejected as malformed. Idempotency is not yet supported. Transcription, translation, streaming audio, input governance, live-provider compatibility, and calibrated character/audio billing remain pending.
+
 ## Structured logging
 
 `features.structured_logging` enables newline-delimited JSON logs. It defaults off in single-user mode and on in multi-user mode. When disabled, request correlation and provider log calls are absent from the hot path.

@@ -23,6 +23,7 @@ features:
   responses_api: false
   embeddings_api: false
   moderations_api: false
+  audio_api: false
 
 server:
   host: 0.0.0.0
@@ -148,6 +149,11 @@ moderations_api:
   max_input_characters: 1000000
   default_model: gateway-moderation-latest
   accepted_models: [gateway-moderation-latest, omni-moderation-latest, text-moderation-latest]
+
+audio:
+  max_input_characters: 4096
+  response_formats: [mp3, opus, aac, flac, wav, pcm]
+  max_response_bytes: 25000000
 
 providers:
   - name: google-free

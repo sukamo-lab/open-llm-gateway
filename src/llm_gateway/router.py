@@ -358,6 +358,64 @@ class GatewayRouter:
             raise QuotaExceeded("; ".join(errors))
         raise NoModelAvailable("; ".join(errors) or "no configured embeddings model matches this request")
 
+    async def speech_for(
+        self, payload: dict[str, Any], consumer_id: str | None = None,
+        consumer_limits: tuple[Any, ...] = (),
+    ) -> tuple[bytes, str, str, httpx.Headers]:
+        requested_model = str(payload.get("model", "auto"))
+        requested_provider = payload.get("provider")
+        if requested_provider and not self.config.routing.allow_provider_override:
+            raise NoModelAvailable("provider override is disabled")
+        candidates = self.candidates(
+            requested_model, False, requested_provider, {"audio_speech"}
+        )
+        estimate = max(1, len(str(payload.get("input", ""))) // 3)
+        errors: list[str] = []
+        max_attempts = self.config.routing.max_attempts or len(candidates)
+        for candidate in candidates[:max_attempts]:
+            reservation = await self.quota.reserve(
+                candidate.provider, str(uuid.uuid4()), estimate, candidate.model.name,
+                candidate.model.input_cost_per_million, 0, consumer_id, consumer_limits,
+            )
+            if reservation is None:
+                errors.append(f"{candidate.provider.name}: local quota exhausted")
+                continue
+            try:
+                async with self._semaphores[candidate.provider.name]:
+                    response, _attempts = await self._post_with_retries(
+                        candidate, payload, "audio_speech"
+                    )
+            except httpx.HTTPError as exc:
+                await self.quota.reconcile(reservation, None, False)
+                await self._failed(candidate)
+                errors.append(f"{candidate.provider.name}: {type(exc).__name__}")
+                continue
+            if response.is_error:
+                await self.quota.reconcile(reservation, None, False)
+                await self._failed(candidate)
+                detail = self.upstream_error(response)
+                if not self.config.observability.include_upstream_errors:
+                    detail = "upstream request failed"
+                errors.append(f"{candidate.provider.name}: HTTP {response.status_code} - {detail}")
+                continue
+            content_type = response.headers.get("content-type", "").lower()
+            if not response.content or content_type.startswith(("application/json", "text/")):
+                await self.quota.reconcile(reservation, None, False)
+                await self._failed(candidate)
+                errors.append(f"{candidate.provider.name}: upstream returned invalid audio")
+                continue
+            if len(response.content) > self.config.audio.max_response_bytes:
+                await self.quota.reconcile(reservation, None, False)
+                await self._failed(candidate)
+                errors.append(f"{candidate.provider.name}: upstream audio exceeds configured limit")
+                continue
+            await self.quota.reconcile(reservation, estimate, True, estimate, 0)
+            await self._succeeded(candidate)
+            return response.content, candidate.provider.name, candidate.model.upstream_model, response.headers
+        if errors and all("quota exhausted" in error for error in errors):
+            raise QuotaExceeded("; ".join(errors))
+        raise NoModelAvailable("; ".join(errors) or "no configured speech model matches this request")
+
     @staticmethod
     def estimate_embedding_tokens(input_value: Any) -> int:
         if isinstance(input_value, str):
@@ -590,15 +648,10 @@ class GatewayRouter:
             attempt_started = time.monotonic()
             try:
                 response = await self.client.post(
-                    (
-                        self._embeddings_url(candidate.provider)
-                        if operation == "embeddings" else self._url(candidate.provider)
-                    ),
+                    self._operation_url(candidate.provider, operation),
                     headers=self._headers(candidate.provider),
                     json=(
-                        self._embedding_payload(candidate, payload)
-                        if operation == "embeddings"
-                        else self._upstream_payload(candidate, payload, False)
+                        self._operation_payload(candidate, payload, operation)
                     ),
                     timeout=timeout,
                 )
@@ -683,6 +736,16 @@ class GatewayRouter:
         return f"{provider.base_url.rstrip('/')}/{provider.embeddings_path.lstrip('/')}"
 
     @staticmethod
+    def _operation_url(provider: ProviderConfig, operation: str) -> str:
+        if operation == "embeddings":
+            path = provider.embeddings_path
+        elif operation == "audio_speech":
+            path = provider.audio_speech_path
+        else:
+            path = provider.chat_completions_path
+        return f"{provider.base_url.rstrip('/')}/{path.lstrip('/')}"
+
+    @staticmethod
     def _headers(provider: ProviderConfig) -> dict[str, str]:
         credential = provider.api_key() or ""
         value = f"{provider.api_key_prefix} {credential}".strip()
@@ -717,4 +780,24 @@ class GatewayRouter:
             if key.startswith("_gateway_"):
                 result.pop(key, None)
         return result
+
+    @staticmethod
+    def _operation_payload(
+        candidate: Candidate, payload: dict[str, Any], operation: str,
+    ) -> dict[str, Any]:
+        if operation == "embeddings":
+            return GatewayRouter._embedding_payload(candidate, payload)
+        if operation == "audio_speech":
+            result = {
+                **candidate.provider.audio_speech_request_defaults,
+                **candidate.model.request_overrides,
+                **payload,
+                "model": candidate.model.upstream_model,
+            }
+            result.pop("provider", None)
+            for key in tuple(result):
+                if key.startswith("_gateway_"):
+                    result.pop(key, None)
+            return result
+        return GatewayRouter._upstream_payload(candidate, payload, False)
 

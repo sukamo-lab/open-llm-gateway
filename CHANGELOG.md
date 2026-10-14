@@ -21,6 +21,7 @@ All notable product changes are recorded here. The project follows [Semantic Ver
 - Feature-flagged Responses API adapter over the existing governed chat execution pipeline.
 - Feature-flagged embeddings API with capability routing, validation, accounting, retries, and failover.
 - Feature-flagged OpenAI-compatible moderation API using bounded deterministic local text classification.
+- Feature-flagged text-to-speech API with bounded input, binary responses, and capability-aware failover.
 
 ## [0.5.0] - 2026-10-13
 
