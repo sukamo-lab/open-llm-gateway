@@ -74,6 +74,7 @@ features:
   tracing: false
   pii_detection: false
   moderation: false
+  prompt_injection: false
 server:
   host: 127.0.0.1
   port: 8000

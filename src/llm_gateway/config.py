@@ -38,6 +38,7 @@ class ModelConfig(StrictModel):
     input_cost_per_million: float = Field(default=0, ge=0)
     output_cost_per_million: float = Field(default=0, ge=0)
     request_overrides: dict[str, object] = Field(default_factory=dict)
+    prompt_injection_safe: bool = False
 
     @model_validator(mode="after")
     def normalize_capabilities(self) -> "ModelConfig":
@@ -107,6 +108,7 @@ class GatewayConfig(StrictModel):
     telemetry: "TelemetryConfig" = Field(default_factory=lambda: TelemetryConfig())
     pii: "PIIConfig" = Field(default_factory=lambda: PIIConfig())
     moderation: "ModerationConfig" = Field(default_factory=lambda: ModerationConfig())
+    prompt_injection: "PromptInjectionConfig" = Field(default_factory=lambda: PromptInjectionConfig())
     features: "FeatureConfig" = Field(default_factory=lambda: FeatureConfig())
     providers: list[ProviderConfig]
 
@@ -128,6 +130,7 @@ class GatewayConfig(StrictModel):
                 "tracing": False,
                 "pii_detection": False,
                 "moderation": False,
+                "prompt_injection": False,
             },
             "multi": {
                 "authentication": True, "admin_api": True, "managed_keys": True,
@@ -139,6 +142,7 @@ class GatewayConfig(StrictModel):
                 "tracing": False,
                 "pii_detection": False,
                 "moderation": False,
+                "prompt_injection": False,
             },
         }[self.mode]
         for name, default in defaults.items():
@@ -201,6 +205,18 @@ class GatewayConfig(StrictModel):
             and self.moderation.streaming_output == "bypass"
         ):
             issues.append(("WARN", "streaming responses bypass configured output moderation"))
+        if self.features.prompt_injection and self.prompt_injection.failure_mode == "open":
+            issues.append(("WARN", "prompt-injection engine failures are configured to bypass policy"))
+        if (
+            self.features.prompt_injection
+            and self.prompt_injection.action == "route"
+            and not any(
+                model.prompt_injection_safe
+                for provider in self.providers if provider.enabled
+                for model in provider.models
+            )
+        ):
+            issues.append(("ERROR", "prompt-injection route policy has no eligible safe model"))
         endpoint = self.telemetry.endpoint()
         if self.features.tracing and endpoint and endpoint.startswith("http://"):
             issues.append(("WARN", "OpenTelemetry exporter endpoint is not encrypted"))
@@ -404,6 +420,29 @@ class ModerationConfig(StrictModel):
         return self
 
 
+class PromptInjectionConfig(StrictModel):
+    action: Literal["score", "warn", "block", "route"] = "warn"
+    threshold: float = Field(default=0.5, gt=0, le=1)
+    signals: set[Literal[
+        "instruction_override", "secret_exfiltration", "role_override",
+        "tool_manipulation", "encoding_evasion",
+    ]] = Field(default_factory=lambda: {
+        "instruction_override", "secret_exfiltration", "role_override",
+        "tool_manipulation", "encoding_evasion",
+    })
+    scan_roles: set[Literal["user", "tool"]] = Field(default_factory=lambda: {"user", "tool"})
+    max_scan_characters: int = Field(default=1_000_000, ge=1_024, le=10_000_000)
+    failure_mode: Literal["open", "closed"] = "closed"
+
+    @model_validator(mode="after")
+    def valid_policy(self) -> "PromptInjectionConfig":
+        if not self.signals:
+            raise ValueError("prompt-injection signals must not be empty")
+        if not self.scan_roles:
+            raise ValueError("prompt-injection scan_roles must not be empty")
+        return self
+
+
 class FeatureConfig(StrictModel):
     authentication: bool | None = None
     admin_api: bool | None = None
@@ -420,6 +459,7 @@ class FeatureConfig(StrictModel):
     tracing: bool | None = None
     pii_detection: bool | None = None
     moderation: bool | None = None
+    prompt_injection: bool | None = None
 
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")

@@ -123,6 +123,20 @@ The built-in engine is a small deterministic baseline for deployment wiring and 
 
 Moderation policy configuration participates in exact-cache invalidation, and output decisions occur before cache writes. Logs and `llm_gateway_moderation_events_total` contain no prompts, responses, matched terms, tenant IDs, or request IDs. Start in monitor mode, evaluate false positives and false negatives against a governed corpus, then enable blocking only with an escalation and appeal process appropriate to the application.
 
+## Prompt-injection risk policy
+
+`features.prompt_injection` enables a local input-only risk stage before moderation, PII transformation, idempotency, caching, quota reservation, and routing. It is disabled by default in both modes and imports no risk engine when disabled. The provider-neutral `PromptInjectionEngine` protocol supports in-process engines; versioned third-party loading is deferred to the extension SDK.
+
+The built-in engine combines bounded heuristic signals for instruction override, secret-exfiltration requests, role override, tool manipulation, and encoding evasion. Repeated matches do not inflate a signal's weight; distinct signal weights combine into a score from zero to one. This score is a configurable operational heuristic, not a probability, classifier guarantee, or prompt-injection security boundary.
+
+- `action: score` records and returns risk metadata without changing behavior.
+- `warn` additionally emits a content-free warning log and marks streaming responses with `X-Prompt-Injection-Risk: warning`.
+- `block` rejects requests at or above `threshold` before provider or storage work.
+- `route` restricts risky requests to models configured with `prompt_injection_safe: true`. Normal requests retain ordinary free-before-paid routing. The marker is an operator assertion about deployment policy, isolation, tool access, or model suitability—not a certification that a model is immune to injection.
+- `scan_roles` defaults to untrusted `user` and `tool` messages. `max_scan_characters` bounds work; `failure_mode` controls whether engine failures reject or explicitly bypass policy.
+
+Responses include only action, score, threshold, risky flag, finding count, signal names, and routing requirement under `gateway.prompt_injection`. Metrics and logs never include prompt text, matched phrases, tenant IDs, or request IDs. Policy and model trust settings participate in exact-cache invalidation. Calibrate thresholds against adversarial and ordinary application traffic before blocking or routing production requests.
+
 When `allow_client_bypass` is true, `Cache-Control: no-cache` or `no-store` bypasses both lookup and storage. Disable the feature for sensitive workloads that prohibit response retention. Cached copies omit upstream rate-limit metadata because it becomes stale immediately.
 
 Price fields are metadata expressed in USD per million tokens. Keep prices current when vendors change them.

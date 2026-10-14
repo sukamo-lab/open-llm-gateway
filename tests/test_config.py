@@ -146,3 +146,33 @@ def test_moderation_is_opt_in_and_custom_terms_are_strictly_validated():
     assert any("moderation engine failures" in message for message in warnings)
     assert any("output moderation" in message for message in warnings)
 
+
+def test_prompt_injection_is_opt_in_and_route_policy_requires_safe_model():
+    provider = {
+        "name": "p", "base_url": "https://example.test/v1", "api_key_value": "key",
+        "models": [{"name": "fast", "upstream_model": "model"}],
+    }
+    assert GatewayConfig.model_validate({"mode": "single", "providers": [provider]}).features.prompt_injection is False
+    assert GatewayConfig.model_validate({"mode": "multi", "providers": [provider]}).features.prompt_injection is False
+    config = GatewayConfig.model_validate({
+        "features": {"prompt_injection": True},
+        "prompt_injection": {"action": "route", "failure_mode": "open"},
+        "providers": [provider],
+    })
+    issues = config.diagnostics()
+    assert any(severity == "ERROR" and "no eligible safe model" in message for severity, message in issues)
+    assert any(severity == "WARN" and "engine failures" in message for severity, message in issues)
+
+    safe_provider = {**provider, "models": [{
+        "name": "safe", "upstream_model": "model", "prompt_injection_safe": True,
+    }]}
+    safe_config = GatewayConfig.model_validate({
+        "features": {"prompt_injection": True},
+        "prompt_injection": {"action": "route"},
+        "providers": [safe_provider],
+    })
+    assert not any(
+        severity == "ERROR" and "safe model" in message
+        for severity, message in safe_config.diagnostics()
+    )
+
