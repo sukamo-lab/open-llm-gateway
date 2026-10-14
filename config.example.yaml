@@ -22,6 +22,7 @@ features:
   prompt_injection: false
   responses_api: false
   embeddings_api: false
+  moderations_api: false
 
 server:
   host: 0.0.0.0
@@ -141,6 +142,12 @@ embeddings:
   max_token_ids: 1000000
   max_dimensions: 65536
   allow_token_arrays: true
+
+moderations_api:
+  max_inputs: 256
+  max_input_characters: 1000000
+  default_model: gateway-moderation-latest
+  accepted_models: [gateway-moderation-latest, omni-moderation-latest, text-moderation-latest]
 
 providers:
   - name: google-free

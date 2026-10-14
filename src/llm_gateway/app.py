@@ -268,6 +268,13 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         from .moderation import ModerationProcessor
 
         moderation_processor = ModerationProcessor(config.moderation)
+    moderation_api_processor = None
+    if config.features.moderations_api:
+        from .moderation import ModerationProcessor
+
+        moderation_api_processor = ModerationProcessor(
+            config.moderation.model_copy(update={"action": "monitor"})
+        )
     injection_processor = None
     if config.features.prompt_injection:
         from .prompt_injection import PromptInjectionProcessor
@@ -474,6 +481,7 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                 "health": "/health", "ready": "/ready", "models": "/v1/models",
                 **({"responses": "/v1/responses"} if config.features.responses_api else {}),
                 **({"embeddings": "/v1/embeddings"} if config.features.embeddings_api else {}),
+                **({"moderations": "/v1/moderations"} if config.features.moderations_api else {}),
                 "docs": "/docs" if config.server.docs_enabled else None,
             },
         }
@@ -1082,6 +1090,41 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             body.setdefault("gateway", {})["policies"] = policy_metadata
         return body
 
+    @app.post("/v1/moderations")
+    async def moderations(request: Request):
+        await require_api(request)
+        if request.headers.get("idempotency-key"):
+            raise HTTPException(400, "Idempotency-Key is not supported for moderation requests")
+        try:
+            payload = await request.json()
+        except ValueError as exc:
+            raise HTTPException(400, "request body must contain valid JSON") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(400, "request body must be a JSON object")
+        from .moderation import ModerationError
+        from .moderations_api import (
+            ModerationsValidationError, moderation_response, validate_moderations_payload,
+        )
+
+        try:
+            model, inputs = validate_moderations_payload(payload, config.moderations_api)
+        except ModerationsValidationError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        reports = []
+        try:
+            assert moderation_api_processor is not None
+            for input_text in inputs:
+                report = moderation_api_processor.process_request({"input": input_text})
+                reports.append(report)
+                await metrics.moderation(
+                    "api", "classify", "flagged" if report.flagged else "clean"
+                )
+        except ModerationError as exc:
+            await metrics.moderation("api", "classify", "error")
+            logger.error("Moderation API evaluation failed error_type=%s", type(exc).__name__)
+            raise HTTPException(503, "moderation engine could not evaluate the request") from exc
+        return moderation_response(model, reports)
+
     disabled_paths: set[str] = set()
     if not config.features.admin_api:
         disabled_paths.update(
@@ -1104,6 +1147,8 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         disabled_paths.add("/v1/responses")
     if not config.features.embeddings_api:
         disabled_paths.add("/v1/embeddings")
+    if not config.features.moderations_api:
+        disabled_paths.add("/v1/moderations")
     app.router.routes = [
         route for route in app.router.routes
         if getattr(route, "path", None) not in disabled_paths

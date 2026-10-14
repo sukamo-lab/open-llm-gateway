@@ -20,6 +20,7 @@ All notable product changes are recorded here. The project follows [Semantic Ver
 - Opt-in prompt-injection risk scoring, warning, blocking, and operator-designated safe-model routing.
 - Feature-flagged Responses API adapter over the existing governed chat execution pipeline.
 - Feature-flagged embeddings API with capability routing, validation, accounting, retries, and failover.
+- Feature-flagged OpenAI-compatible moderation API using bounded deterministic local text classification.
 
 ## [0.5.0] - 2026-10-13
 

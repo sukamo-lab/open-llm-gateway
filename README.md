@@ -9,6 +9,7 @@ It has two explicit profiles: a minimal single-user mode and a fully managed mul
 - OpenAI-compatible chat completions, model listing, and SSE streaming.
 - Feature-flagged Responses API compatibility for non-streaming text, vision, reasoning, JSON, and function tools.
 - Feature-flagged embeddings API with batching, token-array input, quotas, retries, and free-first failover.
+- Feature-flagged OpenAI-compatible text moderation API with bounded batches and no provider call.
 - Capability-aware routing for chat, reasoning, vision, tools, and JSON workloads.
 - Strict free-before-paid ordering with optional prohibition of paid fallback.
 - Persistent atomic rolling quotas for requests and tokens.
@@ -78,6 +79,14 @@ For embeddings, enable `features.embeddings_api`, configure an `embeddings`-capa
 ```powershell
 $body = @{ model = "embed"; input = @("first text", "second text") } | ConvertTo-Json
 Invoke-RestMethod http://localhost:8000/v1/embeddings `
+  -Method Post -Headers $headers -ContentType application/json -Body $body
+```
+
+For local text classification without an upstream model, enable `features.moderations_api` and call:
+
+```powershell
+$body = @{ model = "gateway-moderation-latest"; input = @("Hello", "text to classify") } | ConvertTo-Json
+Invoke-RestMethod http://localhost:8000/v1/moderations `
   -Method Post -Headers $headers -ContentType application/json -Body $body
 ```
 

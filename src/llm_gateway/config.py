@@ -113,6 +113,7 @@ class GatewayConfig(StrictModel):
     prompt_injection: "PromptInjectionConfig" = Field(default_factory=lambda: PromptInjectionConfig())
     responses: "ResponsesConfig" = Field(default_factory=lambda: ResponsesConfig())
     embeddings: "EmbeddingsConfig" = Field(default_factory=lambda: EmbeddingsConfig())
+    moderations_api: "ModerationsAPIConfig" = Field(default_factory=lambda: ModerationsAPIConfig())
     features: "FeatureConfig" = Field(default_factory=lambda: FeatureConfig())
     providers: list[ProviderConfig]
 
@@ -137,6 +138,7 @@ class GatewayConfig(StrictModel):
                 "prompt_injection": False,
                 "responses_api": False,
                 "embeddings_api": False,
+                "moderations_api": False,
             },
             "multi": {
                 "authentication": True, "admin_api": True, "managed_keys": True,
@@ -151,6 +153,7 @@ class GatewayConfig(StrictModel):
                 "prompt_injection": False,
                 "responses_api": False,
                 "embeddings_api": False,
+                "moderations_api": False,
             },
         }[self.mode]
         for name, default in defaults.items():
@@ -471,6 +474,23 @@ class EmbeddingsConfig(StrictModel):
     allow_token_arrays: bool = True
 
 
+class ModerationsAPIConfig(StrictModel):
+    max_inputs: int = Field(default=256, ge=1, le=10_000)
+    max_input_characters: int = Field(default=1_000_000, ge=1_024, le=10_000_000)
+    default_model: str = Field(default="gateway-moderation-latest", min_length=1, max_length=128)
+    accepted_models: set[str] = Field(default_factory=lambda: {
+        "gateway-moderation-latest", "omni-moderation-latest", "text-moderation-latest",
+    })
+
+    @model_validator(mode="after")
+    def valid_models(self) -> "ModerationsAPIConfig":
+        if not self.accepted_models or any(not model or len(model) > 128 for model in self.accepted_models):
+            raise ValueError("moderations accepted_models must contain bounded non-empty names")
+        if self.default_model not in self.accepted_models:
+            raise ValueError("moderations default_model must be listed in accepted_models")
+        return self
+
+
 class FeatureConfig(StrictModel):
     authentication: bool | None = None
     admin_api: bool | None = None
@@ -490,6 +510,7 @@ class FeatureConfig(StrictModel):
     prompt_injection: bool | None = None
     responses_api: bool | None = None
     embeddings_api: bool | None = None
+    moderations_api: bool | None = None
 
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
