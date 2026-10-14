@@ -17,6 +17,7 @@ features:
   # Opt in after selecting retention and a backend appropriate for your deployment.
   exact_cache: false
   tracing: false
+  pii_detection: false
 
 server:
   host: 0.0.0.0
@@ -94,6 +95,17 @@ telemetry:
   # Tenant identifiers are excluded from traces unless explicitly required.
   include_tenant_id: false
   failure_mode: open
+
+pii:
+  # Optional local policy stage; no prompt content is sent to another service.
+  action: redact
+  scan: input
+  detectors: [email, phone, credit_card, us_ssn]
+  replacement: "[REDACTED:{type}]"
+  max_scan_characters: 1000000
+  failure_mode: closed
+  # Output scanning cannot safely transform an SSE stream without buffering it.
+  streaming_output: block
 
 providers:
   - name: google-free

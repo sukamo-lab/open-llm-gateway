@@ -17,6 +17,7 @@ It has two explicit profiles: a minimal single-user mode and a fully managed mul
 - Multi-tenant consumer-key issuance, revocation, per-tenant quotas, and spend limits.
 - Provider/model SLA histograms, cache/retry/circuit metrics, and ready-to-import Prometheus alerts and Grafana dashboard.
 - Opt-in OpenTelemetry tracing with W3C propagation, OTLP export, and JSON-log correlation.
+- Opt-in local PII detection, redaction, or blocking with content-free audit metadata.
 - `${ENV}` configuration expansion, model aliases, vendor headers, cost metadata, and safe secret handling.
 - Cross-platform Python package, Dockerfile, and Docker Compose deployment.
 

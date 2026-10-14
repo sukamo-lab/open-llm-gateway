@@ -33,6 +33,8 @@ For tracing, send OTLP/HTTP to a local or regional OpenTelemetry Collector rathe
 
 For SLA monitoring, import `deploy/grafana/llm-gateway-dashboard.json` and load `deploy/prometheus/llm-gateway-alerts.yml` into Prometheus. Review the example 90% provider success, 30-second p95, 5% gateway 5xx, traffic-volume, and duration thresholds against your own objectives before enabling notifications. Alert on validated `provider_results` for user-visible reliability and use raw `provider_requests` plus retry metrics for upstream troubleshooting.
 
+For PII policy operation, monitor `llm_gateway_pii_events_total` by stage, action, and outcome. Investigate scanner errors immediately in fail-open deployments because requests may have continued without evaluation. Logs contain detector types and counts but not matched values. Before enabling blocking or redaction, run representative and adversarial test data through a non-production environment and document acceptable false-positive behavior. Output scanning with SSE must either block streaming or explicitly report a bypass.
+
 ## Production checklist
 
 1. Copy `config.example.yaml` and `.env.example`; keep both real files out of source control.

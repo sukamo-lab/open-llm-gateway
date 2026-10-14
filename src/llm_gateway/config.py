@@ -105,6 +105,7 @@ class GatewayConfig(StrictModel):
     idempotency: "IdempotencyConfig" = Field(default_factory=lambda: IdempotencyConfig())
     cache: "CacheConfig" = Field(default_factory=lambda: CacheConfig())
     telemetry: "TelemetryConfig" = Field(default_factory=lambda: TelemetryConfig())
+    pii: "PIIConfig" = Field(default_factory=lambda: PIIConfig())
     features: "FeatureConfig" = Field(default_factory=lambda: FeatureConfig())
     providers: list[ProviderConfig]
 
@@ -124,6 +125,7 @@ class GatewayConfig(StrictModel):
                 "idempotency": False,
                 "exact_cache": False,
                 "tracing": False,
+                "pii_detection": False,
             },
             "multi": {
                 "authentication": True, "admin_api": True, "managed_keys": True,
@@ -133,6 +135,7 @@ class GatewayConfig(StrictModel):
                 "idempotency": True,
                 "exact_cache": False,
                 "tracing": False,
+                "pii_detection": False,
             },
         }[self.mode]
         for name, default in defaults.items():
@@ -179,6 +182,14 @@ class GatewayConfig(StrictModel):
             issues.append(("WARN", "upstream error details may be returned to clients"))
         if self.mode == "multi" and self.features.exact_cache and self.cache.backend == "memory":
             issues.append(("WARN", "in-memory exact cache is not shared across replicas"))
+        if self.features.pii_detection and self.pii.failure_mode == "open":
+            issues.append(("WARN", "PII scanner failures are configured to bypass policy"))
+        if (
+            self.features.pii_detection
+            and self.pii.scan in {"output", "both"}
+            and self.pii.streaming_output == "bypass"
+        ):
+            issues.append(("WARN", "streaming responses bypass configured PII output scanning"))
         endpoint = self.telemetry.endpoint()
         if self.features.tracing and endpoint and endpoint.startswith("http://"):
             issues.append(("WARN", "OpenTelemetry exporter endpoint is not encrypted"))
@@ -330,6 +341,30 @@ class TelemetryConfig(StrictModel):
         return self
 
 
+class PIIConfig(StrictModel):
+    action: Literal["detect", "redact", "block"] = "redact"
+    scan: Literal["input", "output", "both"] = "input"
+    detectors: set[Literal["email", "phone", "ipv4", "credit_card", "us_ssn"]] = Field(
+        default_factory=lambda: {"email", "phone", "credit_card", "us_ssn"}
+    )
+    replacement: str = Field(default="[REDACTED:{type}]", min_length=1, max_length=128)
+    max_scan_characters: int = Field(default=1_000_000, ge=1_024, le=10_000_000)
+    failure_mode: Literal["open", "closed"] = "closed"
+    streaming_output: Literal["block", "bypass"] = "block"
+
+    @model_validator(mode="after")
+    def valid_replacement(self) -> "PIIConfig":
+        if "{" in self.replacement and "{type}" not in self.replacement:
+            raise ValueError("pii replacement supports only the {type} placeholder")
+        try:
+            self.replacement.format(type="email")
+        except (KeyError, ValueError) as exc:
+            raise ValueError("pii replacement supports only the {type} placeholder") from exc
+        if not self.detectors:
+            raise ValueError("pii detectors must not be empty")
+        return self
+
+
 class FeatureConfig(StrictModel):
     authentication: bool | None = None
     admin_api: bool | None = None
@@ -344,6 +379,7 @@ class FeatureConfig(StrictModel):
     idempotency: bool | None = None
     exact_cache: bool | None = None
     tracing: bool | None = None
+    pii_detection: bool | None = None
 
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")

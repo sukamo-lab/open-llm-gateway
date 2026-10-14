@@ -20,6 +20,7 @@ features:
   idempotency: false
   exact_cache: false
   tracing: false
+  pii_detection: false
 ```
 
 Single-user defaults require only a provider key, bind to localhost, do not initialize tenant/key infrastructure, and select the no-database `NullQuotaStore` hot path. Provider quotas or accounting can be enabled independently when desired.
@@ -48,6 +49,7 @@ features:
   idempotency: true
   exact_cache: false
   tracing: false
+  pii_detection: false
 ```
 
 Multi-user defaults enable tenant identities, expiring consumer keys, tenant/provider limits, accounting, costs, metrics, and circuit breaking. PostgreSQL is recommended for multiple replicas.
@@ -71,6 +73,7 @@ Disabled features are not merely hidden:
 - `idempotency: false` avoids idempotency-store initialization and all key/fingerprint work. When enabled, non-streaming chat requests may use `Idempotency-Key` for tenant-scoped safe replay.
 - `exact_cache: false` avoids cache imports, initialization, request hashing, and lookups. The cache is opt-in in both modes because it persists or retains model responses.
 - `tracing: false` avoids OpenTelemetry SDK/exporter imports, span creation, context propagation, and background exporter threads. Tracing is opt-in in both modes.
+- `pii_detection: false` avoids importing or constructing detectors and performs no prompt traversal. It is opt-in in both modes.
 - `authentication: false` removes consumer authentication checks, but is accepted only on a localhost bind.
 
 Invalid dependency combinations fail configuration validation: managed keys require authentication and the admin API; tenant quotas require managed keys; cost tracking requires accounting.

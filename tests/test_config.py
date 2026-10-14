@@ -97,3 +97,25 @@ def test_tracing_is_opt_in_and_batch_must_fit_queue():
             "providers": [provider],
         })
 
+
+def test_pii_is_opt_in_and_replacement_is_strictly_validated():
+    provider = {
+        "name": "p", "base_url": "https://example.test/v1", "api_key_value": "key",
+        "models": [{"name": "fast", "upstream_model": "model"}],
+    }
+    assert GatewayConfig.model_validate({"mode": "single", "providers": [provider]}).features.pii_detection is False
+    assert GatewayConfig.model_validate({"mode": "multi", "providers": [provider]}).features.pii_detection is False
+    with pytest.raises(ValidationError, match="replacement supports only"):
+        GatewayConfig.model_validate({
+            "pii": {"replacement": "[REDACTED:{value}]"},
+            "providers": [provider],
+        })
+    config = GatewayConfig.model_validate({
+        "features": {"pii_detection": True},
+        "pii": {"scan": "both", "failure_mode": "open", "streaming_output": "bypass"},
+        "providers": [provider],
+    })
+    warnings = [message for severity, message in config.diagnostics() if severity == "WARN"]
+    assert any("scanner failures" in message for message in warnings)
+    assert any("streaming responses bypass" in message for message in warnings)
+

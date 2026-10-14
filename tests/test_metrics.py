@@ -14,6 +14,7 @@ async def test_metrics_render_histograms_and_bounded_labels():
     await metrics.retry("free-provider", "chat", "http_429")
     await metrics.cache("memory", "hit")
     await metrics.circuit("free-provider", True)
+    await metrics.pii("input", "redact", "matched")
     rendered = await metrics.render()
 
     escaped_endpoint = 'endpoint="/v1/\\"chat\\"\\n"'
@@ -24,6 +25,7 @@ async def test_metrics_render_histograms_and_bounded_labels():
     assert 'llm_gateway_provider_retries_total{provider="free-provider",model="chat",reason="http_429"} 1' in rendered
     assert 'llm_gateway_cache_requests_total{backend="memory",outcome="hit"} 1' in rendered
     assert 'llm_gateway_provider_circuit_open{provider="free-provider"} 1' in rendered
+    assert 'llm_gateway_pii_events_total{stage="input",action="redact",outcome="matched"} 1' in rendered
     assert f"llm_gateway_http_request_duration_seconds_bucket{{{escaped_endpoint},le=\"0.1\"}} 0" in rendered
     assert f"llm_gateway_http_request_duration_seconds_bucket{{{escaped_endpoint},le=\"1\"}} 1" in rendered
     assert f"llm_gateway_http_request_duration_seconds_bucket{{{escaped_endpoint},le=\"+Inf\"}} 1" in rendered
