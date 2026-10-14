@@ -16,6 +16,7 @@ features:
   idempotency: true
   # Opt in after selecting retention and a backend appropriate for your deployment.
   exact_cache: false
+  tracing: false
 
 server:
   host: 0.0.0.0
@@ -78,6 +79,19 @@ cache:
   failure_mode: open
   redis_url_env: LLM_GATEWAY_REDIS_URL
   redis_prefix: "llm-gateway:exact"
+
+telemetry:
+  # OTEL_EXPORTER_OTLP_TRACES_ENDPOINT defaults to the SDK's local collector endpoint.
+  endpoint_env: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+  sample_ratio: 1.0
+  export_timeout_seconds: 10
+  max_queue_size: 2048
+  max_export_batch_size: 512
+  schedule_delay_millis: 5000
+  excluded_paths: [/health, /ready]
+  # Tenant identifiers are excluded from traces unless explicitly required.
+  include_tenant_id: false
+  failure_mode: open
 
 providers:
   - name: google-free

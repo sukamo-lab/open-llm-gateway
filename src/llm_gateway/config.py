@@ -103,6 +103,7 @@ class GatewayConfig(StrictModel):
     accounting: "AccountingConfig" = Field(default_factory=lambda: AccountingConfig())
     idempotency: "IdempotencyConfig" = Field(default_factory=lambda: IdempotencyConfig())
     cache: "CacheConfig" = Field(default_factory=lambda: CacheConfig())
+    telemetry: "TelemetryConfig" = Field(default_factory=lambda: TelemetryConfig())
     features: "FeatureConfig" = Field(default_factory=lambda: FeatureConfig())
     providers: list[ProviderConfig]
 
@@ -121,6 +122,7 @@ class GatewayConfig(StrictModel):
                 "metrics": False, "circuit_breaker": True, "structured_logging": False,
                 "idempotency": False,
                 "exact_cache": False,
+                "tracing": False,
             },
             "multi": {
                 "authentication": True, "admin_api": True, "managed_keys": True,
@@ -129,6 +131,7 @@ class GatewayConfig(StrictModel):
                 "metrics": True, "circuit_breaker": True, "structured_logging": True,
                 "idempotency": True,
                 "exact_cache": False,
+                "tracing": False,
             },
         }[self.mode]
         for name, default in defaults.items():
@@ -175,6 +178,9 @@ class GatewayConfig(StrictModel):
             issues.append(("WARN", "upstream error details may be returned to clients"))
         if self.mode == "multi" and self.features.exact_cache and self.cache.backend == "memory":
             issues.append(("WARN", "in-memory exact cache is not shared across replicas"))
+        endpoint = self.telemetry.endpoint()
+        if self.features.tracing and endpoint and endpoint.startswith("http://"):
+            issues.append(("WARN", "OpenTelemetry exporter endpoint is not encrypted"))
         for provider in self.providers:
             if self.mode == "multi" and provider.enabled and provider.api_key_value and provider.api_key():
                 issues.append(("WARN", f"{provider.name} stores its API key directly in YAML"))
@@ -284,6 +290,27 @@ class CacheConfig(StrictModel):
         return os.getenv(self.redis_url_env) or None
 
 
+class TelemetryConfig(StrictModel):
+    endpoint_env: str = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
+    sample_ratio: float = Field(default=1.0, ge=0, le=1)
+    export_timeout_seconds: float = Field(default=10, gt=0, le=60)
+    max_queue_size: int = Field(default=2048, ge=1, le=100_000)
+    max_export_batch_size: int = Field(default=512, ge=1, le=10_000)
+    schedule_delay_millis: int = Field(default=5000, ge=100, le=60_000)
+    excluded_paths: set[str] = Field(default_factory=lambda: {"/health", "/ready"})
+    include_tenant_id: bool = False
+    failure_mode: Literal["open", "closed"] = "open"
+
+    def endpoint(self) -> str | None:
+        return os.getenv(self.endpoint_env) or None
+
+    @model_validator(mode="after")
+    def valid_batch_size(self) -> "TelemetryConfig":
+        if self.max_export_batch_size > self.max_queue_size:
+            raise ValueError("max_export_batch_size must not exceed max_queue_size")
+        return self
+
+
 class FeatureConfig(StrictModel):
     authentication: bool | None = None
     admin_api: bool | None = None
@@ -297,6 +324,7 @@ class FeatureConfig(StrictModel):
     structured_logging: bool | None = None
     idempotency: bool | None = None
     exact_cache: bool | None = None
+    tracing: bool | None = None
 
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")

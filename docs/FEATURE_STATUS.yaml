@@ -170,7 +170,20 @@ features:
       - tests/test_logging.py
       - docs/CONFIGURATION.md
     notes: Opt-in JSON request and retry logs with request/tenant correlation and content-safe defaults are implemented; full executable test-suite and collector integration verification remain pending.
-  - {id: OBS-OTEL-001, pillar: observability, name: OpenTelemetry tracing and OTLP export, status: planned, target: v0.7, depends_on: [OBS-LOG-001]}
+  - id: OBS-OTEL-001
+    pillar: observability
+    name: OpenTelemetry tracing and OTLP export
+    status: partial
+    target: v0.7
+    depends_on: [OBS-LOG-001]
+    evidence:
+      - src/llm_gateway/telemetry.py
+      - src/llm_gateway/app.py
+      - src/llm_gateway/router.py
+      - tests/test_telemetry.py
+      - deploy/otel-collector.example.yaml
+      - docs/CONFIGURATION.md
+    notes: Opt-in W3C request and provider spans, OTLP/HTTP batching, sampling, privacy controls, and JSON-log correlation are implemented; streaming provider spans, full pytest, live Collector export, and latency verification remain pending.
   - {id: OBS-SLA-001, pillar: observability, name: Provider/model SLA histograms and dashboards, status: planned, target: v0.7}
   - {id: AUDIT-LEDGER-001, pillar: observability, name: Tamper-evident audit ledger and export, status: planned, target: v0.9}
 

@@ -16,6 +16,7 @@ It has two explicit profiles: a minimal single-user mode and a fully managed mul
 - Client and administrator bearer authentication with environment-based secrets.
 - Multi-tenant consumer-key issuance, revocation, per-tenant quotas, and spend limits.
 - Provider health, usage accounting, request IDs, readiness checks, and Prometheus metrics.
+- Opt-in OpenTelemetry tracing with W3C propagation, OTLP export, and JSON-log correlation.
 - `${ENV}` configuration expansion, model aliases, vendor headers, cost metadata, and safe secret handling.
 - Cross-platform Python package, Dockerfile, and Docker Compose deployment.
 

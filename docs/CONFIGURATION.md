@@ -77,6 +77,20 @@ Backends:
 
 `failure_mode: open` preserves gateway availability when cache startup, reads, or writes fail and marks requests as bypassed; errors remain in operator logs. `closed` rejects requests instead and is appropriate only when policy requires guaranteed cache behavior.
 
+## OpenTelemetry tracing
+
+`features.tracing` enables W3C Trace Context extraction, content-safe server spans, provider-attempt client spans, and OTLP/HTTP batch export. It is opt-in in both modes. Disabled tracing does not import or initialize the telemetry SDK.
+
+Set `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` to the collector traces endpoint, normally `https://collector.example/v1/traces`. Standard OpenTelemetry variables such as `OTEL_EXPORTER_OTLP_HEADERS` and certificate settings configure authentication and TLS without placing secrets in YAML. A vendor-neutral Collector example is provided at `deploy/otel-collector.example.yaml`.
+
+- `sample_ratio`: parent-aware trace-ID ratio from `0` to `1`.
+- `export_timeout_seconds`, `max_queue_size`, `max_export_batch_size`, and `schedule_delay_millis`: bounded asynchronous export behavior.
+- `excluded_paths`: routes such as health probes that should produce no spans.
+- `include_tenant_id`: adds the non-secret internal tenant ID when explicitly enabled; it defaults false for privacy.
+- `failure_mode`: `open` logs an error and continues without tracing if SDK/exporter initialization fails; `closed` treats tracing as a required policy dependency.
+
+Spans include standardized HTTP and generative-AI operation/provider/model attributes, request ID, status, attempt, and error type. They never include prompts, responses, authorization headers, API keys, request headers, or upstream error bodies. Structured JSON logs automatically add `trace.id` and `span.id` while a span is active.
+
 When `allow_client_bypass` is true, `Cache-Control: no-cache` or `no-store` bypasses both lookup and storage. Disable the feature for sensitive workloads that prohibit response retention. Cached copies omit upstream rate-limit metadata because it becomes stale immediately.
 
 Price fields are metadata expressed in USD per million tokens. Keep prices current when vendors change them.
