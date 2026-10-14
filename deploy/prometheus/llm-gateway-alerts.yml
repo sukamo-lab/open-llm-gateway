@@ -1,0 +1,36 @@
+groups:
+  - name: llm-gateway-sla
+    rules:
+      - alert: LLMGatewayProviderSuccessRatioLow
+        expr: |
+          sum by (provider, model) (rate(llm_gateway_provider_results_total{outcome="success"}[10m]))
+          / sum by (provider, model) (rate(llm_gateway_provider_results_total[10m])) < 0.90
+          and sum by (provider, model) (increase(llm_gateway_provider_results_total[10m])) >= 20
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "LLM provider success ratio is below 90%"
+      - alert: LLMGatewayProviderP95LatencyHigh
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le, provider, model) (rate(llm_gateway_provider_request_duration_seconds_bucket[10m]))
+          ) > 30
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "LLM provider p95 latency exceeds 30 seconds"
+      - alert: LLMGatewayProviderCircuitOpen
+        expr: llm_gateway_provider_circuit_open == 1
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "LLM provider circuit has remained open"
+      - alert: LLMGatewayHTTP5xxElevated
+        expr: |
+          sum(rate(llm_gateway_http_requests_total{status=~"5.."}[5m]))
+          / sum(rate(llm_gateway_http_requests_total[5m])) > 0.05
+          and sum(increase(llm_gateway_http_requests_total[5m])) >= 20
+        for: 10m
+        labels: {severity: critical}
+        annotations:
+          summary: "LLM gateway 5xx ratio exceeds 5%"

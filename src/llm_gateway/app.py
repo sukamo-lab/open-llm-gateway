@@ -127,7 +127,13 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                 config.auth.key_cache_max_entries,
             ) if identity_enabled else None
         )
-    metrics = Metrics() if config.features.metrics else NullMetrics()
+    metrics = (
+        Metrics(
+            tuple(config.observability.http_latency_buckets_seconds),
+            tuple(config.observability.provider_latency_buckets_seconds),
+        )
+        if config.features.metrics else NullMetrics()
+    )
     idempotency_store = None
     if config.features.idempotency:
         from .idempotency import PostgresIdempotencyStore, SQLiteIdempotencyStore
@@ -522,6 +528,7 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             response = StreamingResponse(replay(), media_type="text/event-stream")
             if cache_store is not None:
                 response.headers["X-Cache"] = "BYPASS"
+                await metrics.cache(config.cache.backend, "bypass")
             return response
         idempotency_digest = None
         owner_token = None
@@ -559,6 +566,8 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             for directive in cache_control.split(",")
         ):
             cache_allowed = False
+        if cache_store is not None and not cache_allowed:
+            await metrics.cache(config.cache.backend, "bypass")
         if cache_allowed:
             from .cache import exact_cache_key
 
@@ -576,11 +585,13 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                     raise
                 cached = None
                 cache_allowed = False
+                await metrics.cache(config.cache.backend, "bypass")
                 logger.error(
                     "Exact cache lookup failed; bypassing cache error_type=%s",
                     type(exc).__name__,
                 )
             if cached is not None:
+                await metrics.cache(config.cache.backend, "hit")
                 headers = {
                     "X-Cache": "HIT",
                     "Age": str(max(0, int(time.time() - cached.created_at))),
@@ -618,6 +629,8 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
         response_headers = {}
         if cache_store is not None:
+            if cache_allowed:
+                await metrics.cache(config.cache.backend, "miss")
             if cache_allowed and cache_key and len(encoded.encode("utf-8")) <= config.cache.max_response_bytes:
                 cache_result = {
                     **result,

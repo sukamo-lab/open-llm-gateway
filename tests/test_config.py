@@ -6,6 +6,15 @@ from pydantic import ValidationError
 from llm_gateway.config import GatewayConfig, load_config
 
 
+@pytest.mark.parametrize("buckets", ([1, 0.5], [0.5, 0.5], [0, 1], [1, float("inf")], []))
+def test_observability_latency_buckets_must_be_increasing_positive(tmp_path, buckets):
+    with pytest.raises(ValidationError, match="unique, increasing positive"):
+        GatewayConfig.model_validate({
+            "database": str(tmp_path / "usage.db"),
+            "observability": {"http_latency_buckets_seconds": buckets},
+        })
+
+
 def test_unknown_configuration_key_is_rejected(tmp_path: Path):
     path = tmp_path / "config.yaml"
     path.write_text(

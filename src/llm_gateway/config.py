@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import re
 from pathlib import Path
@@ -253,6 +254,24 @@ class ObservabilityConfig(StrictModel):
     log_provider_attempts: bool = True
     log_health_checks: bool = False
     include_exception_stacktraces: bool = False
+    http_latency_buckets_seconds: list[float] = Field(
+        default_factory=lambda: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]
+    )
+    provider_latency_buckets_seconds: list[float] = Field(
+        default_factory=lambda: [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120]
+    )
+
+    @model_validator(mode="after")
+    def valid_latency_buckets(self) -> "ObservabilityConfig":
+        for name in ("http_latency_buckets_seconds", "provider_latency_buckets_seconds"):
+            values = getattr(self, name)
+            if (
+                not values
+                or any(not math.isfinite(value) or value <= 0 for value in values)
+                or values != sorted(set(values))
+            ):
+                raise ValueError(f"{name} must contain unique, increasing positive values")
+        return self
 
 
 class AccountingConfig(StrictModel):
