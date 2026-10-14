@@ -28,6 +28,8 @@ When `auth.enabled` is true, `/v1/*` requires a bearer token listed in the comma
 - `request_deadline_seconds` optionally bounds all non-streaming attempts against one provider. Keep it below the consumer/load-balancer timeout. Streaming retries currently occur through provider failover only before a successful stream is established.
 - Provider `tier` is `free` or `paid`. Free always sorts first.
 - Lower model `priority` sorts first within a tier.
+- `features.cost_routing` replaces priority-first ordering within each tier with estimated request cost. Free providers still always precede paid providers.
+- `unknown_price_policy` places models without pricing last or excludes them. A zero-cost model is known only when it has a `pricing_version`; non-zero legacy prices are treated as known for compatibility.
 - `failure_threshold` consecutive errors open that provider's circuit for `cooldown_seconds`.
 - `max_concurrency` prevents one upstream account from being overloaded.
 
@@ -38,6 +40,28 @@ Each provider may have multiple rolling `limits`. A limit can constrain `request
 Model aliases decouple clients from vendor model IDs. Capabilities document support for `chat`, `reasoning`, `vision`, `tools`, and `json`. A request with `reasoning_effort` only considers reasoning models.
 
 OpenAI-compatible variants can customize `chat_completions_path`, `api_key_header`, `api_key_prefix`, provider `request_defaults`, model `request_overrides`, and arbitrary headers without adding a new adapter. Client request values take precedence over configured defaults and overrides.
+
+### Least-cost routing
+
+Enable `features.cost_routing` to rank eligible models by the estimated input/output cost of each request after capability, provider override, circuit, and paid-fallback filtering. The sort order is deterministic: tier, known-price status, estimated cost, configured priority, provider name, then upstream model. This preserves strict free-before-paid behavior and stable ties.
+
+```yaml
+features:
+  cost_routing: true
+routing:
+  unknown_price_policy: last  # or exclude
+providers:
+  - name: example
+    # ...
+    models:
+      - name: fast
+        upstream_model: provider-model
+        input_cost_per_million: 0.40
+        output_cost_per_million: 1.60
+        pricing_version: "2026-10"
+```
+
+Chat token estimates use bounded request parameters and are reconciled with upstream usage for accounting. Embeddings, speech, and image prompts currently rank on estimated input tokens; endpoint-specific unit pricing remains pending. Chat responses include `gateway.routing.strategy`, `estimated_cost_usd`, and `pricing_version`. Pricing is operator-supplied configuration: validate it against provider terms and update the version whenever rates change.
 
 ## Responses API
 

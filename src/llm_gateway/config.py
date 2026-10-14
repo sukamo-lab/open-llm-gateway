@@ -40,6 +40,7 @@ class ModelConfig(StrictModel):
     )
     input_cost_per_million: float = Field(default=0, ge=0)
     output_cost_per_million: float = Field(default=0, ge=0)
+    pricing_version: str | None = Field(default=None, min_length=1, max_length=64)
     request_overrides: dict[str, object] = Field(default_factory=dict)
     prompt_injection_safe: bool = False
 
@@ -154,6 +155,7 @@ class GatewayConfig(StrictModel):
                 "audio_api": False,
                 "images_api": False,
                 "model_discovery": False,
+                "cost_routing": False,
             },
             "multi": {
                 "authentication": True, "admin_api": True, "managed_keys": True,
@@ -172,6 +174,7 @@ class GatewayConfig(StrictModel):
                 "audio_api": False,
                 "images_api": False,
                 "model_discovery": False,
+                "cost_routing": False,
             },
         }[self.mode]
         for name, default in defaults.items():
@@ -266,6 +269,18 @@ class GatewayConfig(StrictModel):
             for model in provider.models
         ):
             issues.append(("ERROR", "images API has no enabled image-generation-capable model"))
+        if self.features.cost_routing:
+            priced_models = [
+                model
+                for provider in self.providers if provider.enabled
+                for model in provider.models
+                if model.pricing_version
+                or model.input_cost_per_million > 0
+                or model.output_cost_per_million > 0
+            ]
+            if not priced_models:
+                severity = "ERROR" if self.routing.unknown_price_policy == "exclude" else "WARN"
+                issues.append((severity, "cost routing has no models with known pricing"))
         endpoint = self.telemetry.endpoint()
         if self.features.tracing and endpoint and endpoint.startswith("http://"):
             issues.append(("WARN", "OpenTelemetry exporter endpoint is not encrypted"))
@@ -319,6 +334,7 @@ class RoutingConfig(StrictModel):
     max_attempts: int = Field(default=0, ge=0)
     allow_provider_override: bool = False
     paid_fallback: bool = True
+    unknown_price_policy: Literal["last", "exclude"] = "last"
     http_max_connections: int = Field(default=200, gt=0)
     http_max_keepalive_connections: int = Field(default=50, ge=0)
     http_keepalive_expiry_seconds: float = Field(default=30, gt=0)
@@ -578,6 +594,7 @@ class FeatureConfig(StrictModel):
     audio_api: bool | None = None
     images_api: bool | None = None
     model_discovery: bool | None = None
+    cost_routing: bool | None = None
 
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")

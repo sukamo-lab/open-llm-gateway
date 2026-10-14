@@ -257,3 +257,25 @@ def test_model_discovery_is_opt_in_and_requires_admin_api():
             "providers": [provider],
         })
 
+
+def test_cost_routing_is_opt_in_and_pricing_metadata_is_bounded():
+    provider = {
+        "name": "p", "base_url": "https://example.test/v1", "api_key_value": "key",
+        "models": [{"name": "fast", "upstream_model": "model"}],
+    }
+    assert GatewayConfig.model_validate({"providers": [provider]}).features.cost_routing is False
+    configured = GatewayConfig.model_validate({
+        "features": {"cost_routing": True},
+        "routing": {"unknown_price_policy": "exclude"},
+        "providers": [{**provider, "models": [{
+            "name": "fast", "upstream_model": "model", "pricing_version": "2026-10",
+        }]}],
+    })
+    assert configured.features.cost_routing is True
+    with pytest.raises(ValidationError):
+        GatewayConfig.model_validate({
+            "providers": [{**provider, "models": [{
+                "name": "fast", "upstream_model": "model", "pricing_version": "x" * 65,
+            }]}],
+        })
+
