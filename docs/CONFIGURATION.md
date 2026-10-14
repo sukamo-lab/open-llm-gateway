@@ -63,6 +63,24 @@ providers:
 
 Chat token estimates use bounded request parameters and are reconciled with upstream usage for accounting. Embeddings, speech, and image prompts currently rank on estimated input tokens; endpoint-specific unit pricing remains pending. Chat responses include `gateway.routing.strategy`, `estimated_cost_usd`, and `pricing_version`. Pricing is operator-supplied configuration: validate it against provider terms and update the version whenever rates change.
 
+### Latency-aware routing
+
+`features.latency_routing` ranks eligible candidates by a per-provider/model/operation exponentially weighted moving average. It is mutually exclusive with `cost_routing`; capability checks, circuits, provider overrides, paid-fallback policy, and strict free-before-paid tiers still take precedence.
+
+```yaml
+features:
+  latency_routing: true
+routing:
+  latency_ewma_alpha: 0.2
+  latency_cold_start_ms: 1000
+  latency_min_samples: 3
+  latency_exploration_interval: 20  # 0 disables exploration
+```
+
+Candidates below `latency_min_samples` use the cold-start estimate. Every configured exploration interval, the least-sampled candidate in each tier is tried first; this is counter-based and deterministic rather than random. Only successful upstream responses update EWMA observations. Chat responses expose the selected latency state under `gateway.routing.latency`, and `/admin/providers` exposes content-free observations for troubleshooting.
+
+Observations are in-memory and process-local, reset on restart, and are not coordinated between workers or replicas. This makes the current implementation suitable for a single process and safe experimentation; shared state, percentile-aware ranking, outlier controls, and cross-replica convergence remain pending.
+
 ## Responses API
 
 `features.responses_api` exposes `POST /v1/responses`; it is disabled by default in both modes and removed from routing and OpenAPI when disabled. The endpoint translates supported Responses requests into the existing chat pipeline, so authentication, tenant isolation, governance stages, exact caching, idempotency, quotas, free-before-paid routing, retries, and provider failover remain identical.

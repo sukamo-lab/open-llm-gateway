@@ -31,6 +31,8 @@ Model discovery is operator-triggered and read-only. Protect it with the admin A
 
 For least-cost routing, keep pricing metadata under change control and alert on stale `pricing_version` values through your configuration-management process. Use response `gateway.routing` metadata to explain selections. `unknown_price_policy: exclude` can make every otherwise eligible model unavailable, while `last` preserves availability at the risk of selecting a model whose cost is unknown.
 
+For latency routing, begin with a conservative cold-start estimate and exploration interval, then inspect `/admin/providers` observations and existing provider-duration histograms. EWMA state resets on process restart and differs across workers/replicas; use one worker when consistent selection is required. Setting exploration to `0` disables sampling but can leave a temporarily slow candidate permanently disadvantaged.
+
 `llm-gateway --init --init-mode single` creates the no-database minimal profile. `--init-mode multi` creates secured consumer/admin credentials and enables the managed feature set.
 
 `llm-gateway --migration-status --output json` reports component schema versions without changing them. `llm-gateway --migrate` applies pending migrations and is suitable for a deployment pre-start job. See [Database migrations](DATABASE_MIGRATIONS.md).

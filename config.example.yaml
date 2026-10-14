@@ -27,6 +27,7 @@ features:
   images_api: false
   model_discovery: false
   cost_routing: false
+  latency_routing: false
 
 server:
   host: 0.0.0.0
@@ -47,6 +48,10 @@ routing:
   allow_provider_override: false
   paid_fallback: true
   unknown_price_policy: last
+  latency_ewma_alpha: 0.2
+  latency_cold_start_ms: 1000
+  latency_min_samples: 3
+  latency_exploration_interval: 20
   http_max_connections: 200
   http_max_keepalive_connections: 50
   http_keepalive_expiry_seconds: 30

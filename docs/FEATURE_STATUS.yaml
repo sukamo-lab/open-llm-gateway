@@ -145,7 +145,19 @@ features:
       - tests/test_config.py
       - docs/CONFIGURATION.md
     notes: Opt-in deterministic request-cost ranking preserves free-before-paid tiers, supports explicit unknown-price handling and versioned metadata, applies stable tie-breakers, and exposes chat decision metadata; automated price feeds, freshness enforcement, endpoint-native image/audio pricing, historical estimate accuracy, full CI, and benchmarks remain pending.
-  - {id: ROUTE-LAT-001, pillar: routing, name: Latency-aware routing, status: planned, target: v0.8, depends_on: [OBS-SLA-001]}
+  - id: ROUTE-LAT-001
+    pillar: routing
+    name: Latency-aware routing
+    status: partial
+    target: v0.8
+    depends_on: [OBS-SLA-001]
+    evidence:
+      - src/llm_gateway/router.py
+      - src/llm_gateway/config.py
+      - tests/test_router.py
+      - tests/test_config.py
+      - docs/CONFIGURATION.md
+    notes: Opt-in per-operation EWMA ranking preserves free-before-paid tiers, supports bounded cold-start and deterministic least-sampled exploration controls, records only successful responses, and exposes content-free decision state; shared cross-replica observations, percentiles, outlier handling, persistence, full CI, and benchmarks remain pending.
   - {id: ROUTE-POLICY-001, pillar: routing, name: Declarative quality/region/residency routing, status: planned, target: v0.8}
 
   - id: RES-CB-001

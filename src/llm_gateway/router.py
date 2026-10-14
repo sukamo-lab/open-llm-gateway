@@ -53,6 +53,9 @@ class GatewayRouter:
         )
         self._failures: dict[str, int] = {}
         self._open_until: dict[str, float] = {}
+        self._latency_ewma_ms: dict[tuple[str, str, str], float] = {}
+        self._latency_samples: dict[tuple[str, str, str], int] = {}
+        self._latency_selection_count = 0
         self._semaphores = {
             provider.name: asyncio.Semaphore(provider.max_concurrency)
             for provider in config.providers
@@ -109,6 +112,19 @@ class GatewayRouter:
             "prompt_injection_safe_models": [
                 model.name for model in provider.models if model.prompt_injection_safe
             ],
+            "latency_observations": (
+                [
+                    {
+                        "model": model,
+                        "operation": operation,
+                        "ewma_ms": round(value, 3),
+                        "samples": self._latency_samples[(provider_name, model, operation)],
+                    }
+                    for (provider_name, model, operation), value in sorted(self._latency_ewma_ms.items())
+                    if provider_name == provider.name
+                ]
+                if self.config.features.latency_routing else []
+            ),
         } for provider in self.config.providers]
 
     def candidates(
@@ -172,6 +188,65 @@ class GatewayRouter:
             candidate.provider.name,
             candidate.model.upstream_model,
         ))
+
+    @staticmethod
+    def _latency_key(candidate: Candidate, operation: str) -> tuple[str, str, str]:
+        return candidate.provider.name, candidate.model.name, operation
+
+    def _observe_latency(self, candidate: Candidate, operation: str, elapsed_ms: float) -> None:
+        if not self.config.features.latency_routing:
+            return
+        key = self._latency_key(candidate, operation)
+        previous = self._latency_ewma_ms.get(key)
+        alpha = self.config.routing.latency_ewma_alpha
+        self._latency_ewma_ms[key] = (
+            elapsed_ms if previous is None else alpha * elapsed_ms + (1 - alpha) * previous
+        )
+        self._latency_samples[key] = self._latency_samples.get(key, 0) + 1
+
+    def _observe_valid_response(
+        self, candidate: Candidate, operation: str, response: httpx.Response,
+    ) -> None:
+        elapsed_ms = response.extensions.get("gateway_elapsed_ms")
+        if isinstance(elapsed_ms, (int, float)):
+            self._observe_latency(candidate, operation, float(elapsed_ms))
+
+    def latency_state(self, candidate: Candidate, operation: str) -> dict[str, Any]:
+        key = self._latency_key(candidate, operation)
+        samples = self._latency_samples.get(key, 0)
+        observed = self._latency_ewma_ms.get(key)
+        return {
+            "operation": operation,
+            "ewma_ms": round(observed, 3) if observed is not None else None,
+            "samples": samples,
+            "cold_start": samples < self.config.routing.latency_min_samples,
+        }
+
+    def rank_by_latency(self, candidates: list[Candidate], operation: str) -> list[Candidate]:
+        if not self.config.features.latency_routing:
+            return candidates
+        self._latency_selection_count += 1
+        interval = self.config.routing.latency_exploration_interval
+        explore = bool(interval and self._latency_selection_count % interval == 0)
+
+        def key(candidate: Candidate) -> tuple[Any, ...]:
+            latency_key = self._latency_key(candidate, operation)
+            samples = self._latency_samples.get(latency_key, 0)
+            observed = self._latency_ewma_ms.get(latency_key)
+            score = (
+                observed
+                if observed is not None and samples >= self.config.routing.latency_min_samples
+                else self.config.routing.latency_cold_start_ms
+            )
+            return (
+                candidate.provider.tier == "paid",
+                samples if explore else score,
+                candidate.model.priority,
+                candidate.provider.name,
+                candidate.model.upstream_model,
+            )
+
+        return sorted(candidates, key=key)
 
     @staticmethod
     def estimate_tokens(payload: dict[str, Any]) -> int:
@@ -247,6 +322,7 @@ class GatewayRouter:
         )
         estimate = self.estimate_embedding_tokens(payload.get("input"))
         candidates = self.rank_by_cost(candidates, estimate, 0)
+        candidates = self.rank_by_latency(candidates, "embeddings")
         errors: list[str] = []
         max_attempts = self.config.routing.max_attempts or len(candidates)
         for candidate in candidates[:max_attempts]:
@@ -370,6 +446,7 @@ class GatewayRouter:
             await self.quota.reconcile(
                 reservation, actual, True, prompt_tokens, 0,
             )
+            self._observe_valid_response(candidate, "embeddings", response)
             await self._succeeded(candidate)
             if self.log_provider_attempts:
                 logger.info(
@@ -419,6 +496,7 @@ class GatewayRouter:
         )
         estimate = max(1, len(str(payload.get("input", ""))) // 3)
         candidates = self.rank_by_cost(candidates, estimate, 0)
+        candidates = self.rank_by_latency(candidates, "audio_speech")
         errors: list[str] = []
         max_attempts = self.config.routing.max_attempts or len(candidates)
         for candidate in candidates[:max_attempts]:
@@ -459,6 +537,7 @@ class GatewayRouter:
                 errors.append(f"{candidate.provider.name}: upstream audio exceeds configured limit")
                 continue
             await self.quota.reconcile(reservation, estimate, True, estimate, 0)
+            self._observe_valid_response(candidate, "audio_speech", response)
             await self._succeeded(candidate)
             return response.content, candidate.provider.name, candidate.model.upstream_model, response.headers
         if errors and all("quota exhausted" in error for error in errors):
@@ -480,6 +559,7 @@ class GatewayRouter:
         )
         estimate = max(1, len(str(payload.get("prompt", ""))) // 3)
         candidates = self.rank_by_cost(candidates, estimate, 0)
+        candidates = self.rank_by_latency(candidates, "image_generation")
         errors: list[str] = []
         max_attempts = self.config.routing.max_attempts or len(candidates)
         for candidate in candidates[:max_attempts]:
@@ -524,6 +604,7 @@ class GatewayRouter:
                 errors.append(f"{candidate.provider.name}: upstream returned invalid image data")
                 continue
             await self.quota.reconcile(reservation, estimate, True, estimate, 0)
+            self._observe_valid_response(candidate, "image_generation", response)
             await self._succeeded(candidate)
             body["gateway"] = {
                 "provider": candidate.provider.name,
@@ -565,6 +646,7 @@ class GatewayRouter:
             require_injection_safe,
         )
         candidates = self.rank_by_cost(candidates, estimated_input, estimated_output)
+        candidates = self.rank_by_latency(candidates, "chat")
         if requested_provider and not self.config.routing.allow_provider_override:
             raise NoModelAvailable("provider override is disabled")
         max_attempts = self.config.routing.max_attempts or len(candidates)
@@ -645,6 +727,7 @@ class GatewayRouter:
                 usage.get("prompt_tokens") or usage.get("input_tokens"),
                 usage.get("completion_tokens") or usage.get("output_tokens"),
             )
+            self._observe_valid_response(candidate, "chat", response)
             await self._succeeded(candidate)
             if self.log_provider_attempts:
                 logger.info(
@@ -658,11 +741,19 @@ class GatewayRouter:
             body["_gateway_meta"] = {
                 "upstream_attempts": upstream_attempts,
                 "routing": {
-                    "strategy": "least_cost" if self.config.features.cost_routing else "priority",
+                    "strategy": (
+                        "least_cost" if self.config.features.cost_routing
+                        else "latency" if self.config.features.latency_routing
+                        else "priority"
+                    ),
                     "estimated_cost_usd": self.estimated_cost(
                         candidate, estimated_input, estimated_output
                     ),
                     "pricing_version": candidate.model.pricing_version,
+                    **(
+                        {"latency": self.latency_state(candidate, "chat")}
+                        if self.config.features.latency_routing else {}
+                    ),
                 },
                 "rate_limits": {
                     key: value for key, value in response.headers.items()
@@ -691,6 +782,7 @@ class GatewayRouter:
             require_injection_safe,
         )
         candidates = self.rank_by_cost(candidates, estimated_input, estimated_output)
+        candidates = self.rank_by_latency(candidates, "chat")
         max_attempts = self.config.routing.max_attempts or len(candidates)
         quota_skips = 0
         for candidate in candidates[:max_attempts]:
@@ -731,6 +823,9 @@ class GatewayRouter:
                         candidate.provider.name, candidate.model.name, candidate.provider.tier,
                         "success", str(response.status_code),
                         (time.monotonic() - attempt_started) * 1000,
+                    )
+                    self._observe_latency(
+                        candidate, "chat", (time.monotonic() - attempt_started) * 1000
                     )
                     await self._succeeded(candidate)
                     return
@@ -791,10 +886,12 @@ class GatewayRouter:
                 )
                 if trace_handle is not None:
                     self.telemetry.finish_provider(trace_handle, status_code=response.status_code)
+                elapsed_ms = (time.monotonic() - attempt_started) * 1000
+                response.extensions["gateway_elapsed_ms"] = elapsed_ms
                 await self.metrics.provider_request(
                     candidate.provider.name, candidate.model.name, candidate.provider.tier,
                     "success" if response.status_code < 400 else "error",
-                    str(response.status_code), (time.monotonic() - attempt_started) * 1000,
+                    str(response.status_code), elapsed_ms,
                 )
                 if response.status_code not in RETRY_STATUS or attempt == routing.retry_attempts:
                     return response, attempt

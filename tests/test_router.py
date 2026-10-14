@@ -133,6 +133,78 @@ async def test_cost_routing_exposes_selected_price_metadata(tmp_path, monkeypatc
     assert body["_gateway_meta"]["routing"]["estimated_cost_usd"] > 0
 
 
+def test_latency_routing_uses_ewma_and_preserves_free_first(tmp_path, monkeypatch):
+    for key in ("FREE_A", "FREE_B", "PAID_KEY"):
+        monkeypatch.setenv(key, "secret")
+    config = make_config(tmp_path, [
+        provider("slow", "free", "FREE_A", [{"name": "slow", "upstream_model": "slow"}]),
+        provider("fast", "free", "FREE_B", [{"name": "fast", "upstream_model": "fast"}]),
+        provider("paid", "paid", "PAID_KEY", [{"name": "paid", "upstream_model": "paid"}]),
+    ])
+    config.features.latency_routing = True
+    config.routing.latency_ewma_alpha = 0.5
+    config.routing.latency_min_samples = 2
+    config.routing.latency_exploration_interval = 0
+    router = GatewayRouter(config, QuotaStore(config.database), httpx.AsyncClient())
+    candidates = router.candidates("auto", False)
+    by_name = {candidate.model.name: candidate for candidate in candidates}
+    for value in (1000, 800):
+        router._observe_latency(by_name["slow"], "chat", value)
+    for value in (100, 80):
+        router._observe_latency(by_name["fast"], "chat", value)
+    for value in (10, 8):
+        router._observe_latency(by_name["paid"], "chat", value)
+    ranked = router.rank_by_latency(candidates, "chat")
+    assert [candidate.model.name for candidate in ranked] == ["fast", "slow", "paid"]
+    assert router.latency_state(by_name["slow"], "chat")["ewma_ms"] == 900
+
+
+def test_latency_routing_explores_least_sampled_deterministically(tmp_path, monkeypatch):
+    for key in ("A", "B"):
+        monkeypatch.setenv(key, "secret")
+    config = make_config(tmp_path, [
+        provider("a", "free", "A", [{"name": "a", "upstream_model": "a", "priority": 1}]),
+        provider("b", "free", "B", [{"name": "b", "upstream_model": "b", "priority": 2}]),
+    ])
+    config.features.latency_routing = True
+    config.routing.latency_min_samples = 1
+    config.routing.latency_exploration_interval = 2
+    router = GatewayRouter(config, QuotaStore(config.database), httpx.AsyncClient())
+    candidates = router.candidates("auto", False)
+    router._observe_latency(candidates[0], "chat", 50)
+    router._observe_latency(candidates[0], "chat", 50)
+    router._observe_latency(candidates[1], "chat", 500)
+    assert router.rank_by_latency(candidates, "chat")[0].model.name == "a"
+    assert router.rank_by_latency(candidates, "chat")[0].model.name == "b"
+
+
+@pytest.mark.asyncio
+async def test_successful_request_records_explainable_latency_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("FREE_KEY", "secret")
+    config = make_config(tmp_path, [provider(
+        "free", "free", "FREE_KEY", [{"name": "chat", "upstream_model": "vendor-chat"}],
+    )])
+    config.features.latency_routing = True
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        })
+
+    quota = QuotaStore(config.database)
+    await quota.initialize()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        router = GatewayRouter(config, quota, client)
+        body, _provider, _model = await router.complete_for({
+            "model": "chat", "messages": [{"role": "user", "content": "hello"}],
+        })
+    routing = body["_gateway_meta"]["routing"]
+    assert routing["strategy"] == "latency"
+    assert routing["latency"]["samples"] == 1
+    assert routing["latency"]["ewma_ms"] is not None
+
+
 def test_prompt_injection_route_only_selects_marked_safe_models(tmp_path, monkeypatch):
     monkeypatch.setenv("FREE_KEY", "secret")
     monkeypatch.setenv("PAID_KEY", "secret")
