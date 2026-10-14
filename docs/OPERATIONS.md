@@ -31,6 +31,8 @@ For exact caching, use the memory backend only for a single process. Use Postgre
 
 For tracing, send OTLP/HTTP to a local or regional OpenTelemetry Collector rather than directly coupling the gateway to a monitoring vendor. Protect collector ingestion with TLS and authentication, bound exporter queues, and select a sampling ratio appropriate for traffic. Export occurs in batches off the request path; shutdown attempts to flush queued spans. Keep tenant IDs disabled unless the monitoring destination is approved for that metadata.
 
+For SLA monitoring, import `deploy/grafana/llm-gateway-dashboard.json` and load `deploy/prometheus/llm-gateway-alerts.yml` into Prometheus. Review the example 90% provider success, 30-second p95, 5% gateway 5xx, traffic-volume, and duration thresholds against your own objectives before enabling notifications. Alert on validated `provider_results` for user-visible reliability and use raw `provider_requests` plus retry metrics for upstream troubleshooting.
+
 ## Production checklist
 
 1. Copy `config.example.yaml` and `.env.example`; keep both real files out of source control.

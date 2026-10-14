@@ -91,6 +91,14 @@ Set `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` to the collector traces endpoint, norma
 
 Spans include standardized HTTP and generative-AI operation/provider/model attributes, request ID, status, attempt, and error type. They never include prompts, responses, authorization headers, API keys, request headers, or upstream error bodies. Structured JSON logs automatically add `trace.id` and `span.id` while a span is active.
 
+## SLA metrics
+
+When `features.metrics` is enabled, `/metrics` exposes Prometheus counters and histograms for gateway HTTP latency, validated provider/model outcomes, every raw upstream attempt, retries, exact-cache outcomes, and provider circuit state. Disabled metrics use a no-op implementation and do not allocate metric state.
+
+`observability.http_latency_buckets_seconds` and `observability.provider_latency_buckets_seconds` define strictly increasing positive histogram buckets. Tune them to the service objectives and expected model latency before production; changing buckets requires restarting the process. Metric labels are deliberately bounded to endpoint, status, provider, public model alias, tier, outcome, cache backend, and retry reason. Tenant identifiers, request IDs, prompts, responses, credentials, and upstream error text are never labels.
+
+The dashboard and alert-rule examples are in `deploy/grafana` and `deploy/prometheus`. Provider results describe fully validated gateway outcomes, while provider requests describe raw HTTP attempts and therefore include same-provider retries.
+
 When `allow_client_bypass` is true, `Cache-Control: no-cache` or `no-store` bypasses both lookup and storage. Disable the feature for sensitive workloads that prohibit response retention. Cached copies omit upstream rate-limit metadata because it becomes stale immediately.
 
 Price fields are metadata expressed in USD per million tokens. Keep prices current when vendors change them.

@@ -2,6 +2,7 @@ import httpx
 import pytest
 
 from llm_gateway.config import GatewayConfig
+from llm_gateway.metrics import Metrics
 from llm_gateway.quota import QuotaStore
 from llm_gateway.router import GatewayRouter
 
@@ -166,13 +167,18 @@ async def test_transient_response_retries_same_provider_with_retry_after(tmp_pat
 
     quota = QuotaStore(config.database)
     await quota.initialize()
+    metrics = Metrics()
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        body, selected, _ = await GatewayRouter(config, quota, client).complete(
+        body, selected, _ = await GatewayRouter(config, quota, client, metrics).complete(
             {"model": "chat", "messages": []}
         )
     assert selected == "free"
     assert calls == 2
     assert body["_gateway_meta"]["upstream_attempts"] == 2
+    assert metrics.provider_requests[("free", "chat", "free", "error", "429")] == 1
+    assert metrics.provider_requests[("free", "chat", "free", "success", "200")] == 1
+    assert metrics.retries[("free", "chat", "http_429")] == 1
+    assert metrics.provider_results[("free", "chat", "free", "success")] == 1
 
 
 @pytest.mark.asyncio

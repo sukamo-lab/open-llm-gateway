@@ -1,0 +1,39 @@
+{
+  "title": "LLM Gateway SLA",
+  "uid": "llm-gateway-sla",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "templating": {"list": []},
+  "panels": [
+    {
+      "id": 1, "type": "timeseries", "title": "Validated success ratio by provider/model",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "sum by (provider, model) (rate(llm_gateway_provider_results_total{outcome=\"success\"}[5m])) / sum by (provider, model) (rate(llm_gateway_provider_results_total[5m]))", "legendFormat": "{{provider}} / {{model}}"}]
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "Upstream p95 latency by provider/model",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "histogram_quantile(0.95, sum by (le, provider, model) (rate(llm_gateway_provider_request_duration_seconds_bucket[5m])))", "legendFormat": "{{provider}} / {{model}}"}]
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "Raw upstream attempts by outcome",
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 8},
+      "targets": [{"refId": "A", "expr": "sum by (provider, model, outcome) (rate(llm_gateway_provider_requests_total[5m]))", "legendFormat": "{{provider}} / {{model}} / {{outcome}}"}]
+    },
+    {
+      "id": 4, "type": "timeseries", "title": "Cache hit ratio",
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 8},
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "sum(rate(llm_gateway_cache_requests_total{outcome=\"hit\"}[5m])) / sum(rate(llm_gateway_cache_requests_total[5m]))", "legendFormat": "hit ratio"}]
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Open provider circuits",
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 8},
+      "targets": [{"refId": "A", "expr": "llm_gateway_provider_circuit_open", "legendFormat": "{{provider}}"}]
+    }
+  ]
+}

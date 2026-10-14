@@ -184,7 +184,21 @@ features:
       - deploy/otel-collector.example.yaml
       - docs/CONFIGURATION.md
     notes: Opt-in W3C request and provider spans, OTLP/HTTP batching, sampling, privacy controls, and JSON-log correlation are implemented; streaming provider spans, full pytest, live Collector export, and latency verification remain pending.
-  - {id: OBS-SLA-001, pillar: observability, name: Provider/model SLA histograms and dashboards, status: planned, target: v0.7}
+  - id: OBS-SLA-001
+    pillar: observability
+    name: Provider/model SLA histograms and dashboards
+    status: partial
+    target: v0.7
+    depends_on: [OBS-METRIC-001]
+    evidence:
+      - src/llm_gateway/metrics.py
+      - src/llm_gateway/router.py
+      - src/llm_gateway/app.py
+      - tests/test_metrics.py
+      - deploy/grafana/llm-gateway-dashboard.json
+      - deploy/prometheus/llm-gateway-alerts.yml
+      - docs/OPERATIONS.md
+    notes: Low-cardinality provider/model result, raw-attempt, retry, cache, circuit, and configurable latency metrics plus vendor-neutral dashboard and alert examples are implemented; hosted Prometheus/Grafana ingestion, production threshold calibration, and full CI verification remain pending.
   - {id: AUDIT-LEDGER-001, pillar: observability, name: Tamper-evident audit ledger and export, status: planned, target: v0.9}
 
   - id: CFG-YAML-001
