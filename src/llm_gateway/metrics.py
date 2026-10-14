@@ -62,6 +62,7 @@ class Metrics:
         self.provider_requests: Counter[tuple[str, str, str, str, str]] = Counter()
         self.cache_requests: Counter[tuple[str, str]] = Counter()
         self.retries: Counter[tuple[str, str, str]] = Counter()
+        self.pii_events: Counter[tuple[str, str, str]] = Counter()
         self.circuits: dict[str, int] = {}
         self.latency_ms: Counter[str] = Counter()
         self.http_duration = Histogram(http_buckets)
@@ -99,6 +100,10 @@ class Metrics:
     async def circuit(self, provider: str, is_open: bool) -> None:
         async with self._lock:
             self.circuits[provider] = int(is_open)
+
+    async def pii(self, stage: str, action: str, outcome: str) -> None:
+        async with self._lock:
+            self.pii_events[(stage, action, outcome)] += 1
 
     async def render(self) -> str:
         async with self._lock:
@@ -154,6 +159,14 @@ class Metrics:
                 for key, count in sorted(self.cache_requests.items())
             )
             lines += [
+                "# HELP llm_gateway_pii_events_total PII policy evaluations without content or identity labels.",
+                "# TYPE llm_gateway_pii_events_total counter",
+            ]
+            lines.extend(
+                f'llm_gateway_pii_events_total{_labels(("stage", "action", "outcome"), key)} {count}'
+                for key, count in sorted(self.pii_events.items())
+            )
+            lines += [
                 "# HELP llm_gateway_provider_circuit_open Whether the provider circuit is open.",
                 "# TYPE llm_gateway_provider_circuit_open gauge",
             ]
@@ -206,6 +219,9 @@ class NullMetrics:
         return None
 
     async def circuit(self, provider: str, is_open: bool) -> None:
+        return None
+
+    async def pii(self, stage: str, action: str, outcome: str) -> None:
         return None
 
     async def render(self) -> str:

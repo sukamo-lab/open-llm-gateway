@@ -169,6 +169,16 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             )
         routing_material = {
             "paid_fallback": config.routing.paid_fallback,
+            "pii_policy": (
+                {
+                    "action": config.pii.action,
+                    "scan": config.pii.scan,
+                    "detectors": sorted(config.pii.detectors),
+                    "replacement": config.pii.replacement,
+                    "streaming_output": config.pii.streaming_output,
+                }
+                if config.features.pii_detection else None
+            ),
             "providers": [
                 {
                     "name": provider.name, "enabled": provider.enabled, "tier": provider.tier,
@@ -203,6 +213,11 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                 "OpenTelemetry initialization failed; continuing without tracing error_type=%s",
                 type(exc).__name__,
             )
+    pii_processor = None
+    if config.features.pii_detection:
+        from .pii import PIIProcessor
+
+        pii_processor = PIIProcessor(config.pii)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -496,6 +511,37 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             raise HTTPException(400, "request body must contain valid JSON") from exc
         if not isinstance(payload, dict):
             raise HTTPException(400, "request body must be a JSON object")
+        pii_metadata: dict[str, object] = {}
+        if pii_processor is not None and config.pii.scan in {"input", "both"}:
+            from .pii import PIIBlocked, PIIScanError
+
+            try:
+                payload, pii_report = pii_processor.process_request(payload)
+                await metrics.pii(
+                    "input", pii_report.action,
+                    "matched" if pii_report.matches else "clean",
+                )
+                pii_metadata["input"] = pii_report.metadata()
+                if pii_report.matches:
+                    logger.info(
+                        "PII policy processed request action=%s matches=%s types=%s",
+                        pii_report.action, pii_report.matches, ",".join(pii_report.types),
+                    )
+            except PIIBlocked as exc:
+                await metrics.pii("input", "block", "blocked")
+                logger.warning(
+                    "PII policy blocked request matches=%s types=%s",
+                    exc.report.matches, ",".join(exc.report.types),
+                )
+                raise HTTPException(
+                    400, "request blocked by PII policy",
+                ) from exc
+            except PIIScanError as exc:
+                await metrics.pii("input", config.pii.action, "error")
+                logger.error("PII request scan failed error_type=%s", type(exc).__name__)
+                if config.pii.failure_mode == "closed":
+                    raise HTTPException(422, "request could not be evaluated by PII policy") from exc
+                pii_metadata["input"] = {"action": "bypass", "reason": "scan_error"}
         idempotency_key = request.headers.get("idempotency-key")
         if idempotency_key and not config.features.idempotency:
             raise HTTPException(400, "idempotency is not enabled")
@@ -507,6 +553,12 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         router: GatewayRouter = request.app.state.router
         tenant_limits = context.limits if config.features.tenant_quotas else ()
         if payload.get("stream"):
+            if (
+                pii_processor is not None
+                and config.pii.scan in {"output", "both"}
+                and config.pii.streaming_output == "block"
+            ):
+                raise HTTPException(400, "streaming is disabled when PII output scanning is required")
             if idempotency_key:
                 raise HTTPException(400, "Idempotency-Key is not supported for streaming requests")
             iterator = router.stream(payload, context.tenant_id, tenant_limits)
@@ -526,6 +578,8 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                     yield chunk
 
             response = StreamingResponse(replay(), media_type="text/event-stream")
+            if pii_processor is not None and config.pii.scan in {"output", "both"}:
+                response.headers["X-PII-Output"] = "BYPASS"
             if cache_store is not None:
                 response.headers["X-Cache"] = "BYPASS"
                 await metrics.cache(config.cache.backend, "bypass")
@@ -625,7 +679,49 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                 await idempotency_store.release(context.tenant_id, idempotency_digest, owner_token)
             raise
         meta = body.pop("_gateway_meta", {})
-        result = {**body, "gateway": {"provider": provider, "upstream_model": upstream_model, **meta}}
+        if pii_processor is not None and config.pii.scan in {"output", "both"}:
+            from .pii import PIIBlocked, PIIScanError
+
+            try:
+                body, pii_report = pii_processor.process_response(body)
+                await metrics.pii(
+                    "output", pii_report.action,
+                    "matched" if pii_report.matches else "clean",
+                )
+                pii_metadata["output"] = pii_report.metadata()
+                if pii_report.matches:
+                    logger.info(
+                        "PII policy processed response action=%s matches=%s types=%s",
+                        pii_report.action, pii_report.matches, ",".join(pii_report.types),
+                    )
+            except PIIBlocked as exc:
+                await metrics.pii("output", "block", "blocked")
+                if owner_token and idempotency_digest:
+                    await idempotency_store.release(
+                        context.tenant_id, idempotency_digest, owner_token
+                    )
+                logger.warning(
+                    "PII policy blocked response matches=%s types=%s",
+                    exc.report.matches, ",".join(exc.report.types),
+                )
+                raise HTTPException(502, "upstream response blocked by PII policy") from exc
+            except PIIScanError as exc:
+                await metrics.pii("output", config.pii.action, "error")
+                logger.error("PII response scan failed error_type=%s", type(exc).__name__)
+                if config.pii.failure_mode == "closed":
+                    if owner_token and idempotency_digest:
+                        await idempotency_store.release(
+                            context.tenant_id, idempotency_digest, owner_token
+                        )
+                    raise HTTPException(502, "upstream response could not be evaluated by PII policy") from exc
+                pii_metadata["output"] = {"action": "bypass", "reason": "scan_error"}
+        result = {
+            **body,
+            "gateway": {
+                "provider": provider, "upstream_model": upstream_model, **meta,
+                **({"pii": pii_metadata} if pii_metadata else {}),
+            },
+        }
         encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
         response_headers = {}
         if cache_store is not None:

@@ -99,6 +99,17 @@ When `features.metrics` is enabled, `/metrics` exposes Prometheus counters and h
 
 The dashboard and alert-rule examples are in `deploy/grafana` and `deploy/prometheus`. Provider results describe fully validated gateway outcomes, while provider requests describe raw HTTP attempts and therefore include same-provider retries.
 
+## PII detection and redaction
+
+`features.pii_detection` inserts a local policy stage before idempotency, caching, quota reservation, and provider routing. It is disabled by default in both modes and its module is not imported when disabled. The built-in engine supports `email`, `phone`, `ipv4`, Luhn-valid `credit_card`, and structurally valid `us_ssn` candidates. `src/llm_gateway/pii.py` defines the `PIIDetector` protocol for additional in-process detectors; third-party plugin loading is intentionally deferred until the extension SDK is versioned.
+
+- `action: redact` replaces findings using `replacement`; `detect` reports metadata without changing content; `block` rejects matching input or suppresses matching output.
+- `scan` selects `input`, `output`, or `both`. Input scanning occurs before request fingerprints and cache keys, so persisted data and providers receive the redacted form. Output scanning occurs before response caching.
+- `max_scan_characters` bounds work per direction. `failure_mode: closed` rejects content that cannot be fully evaluated; `open` bypasses on scanner errors and records only content-free audit metadata.
+- `streaming_output: block` rejects streaming requests when output scanning is required. `bypass` permits the stream and returns `X-PII-Output: BYPASS`; SSE transformation is not claimed because safe cross-chunk matching would require buffering the stream.
+
+Successful non-streaming responses include `gateway.pii` metadata containing only action, count, detector types, and redaction count. Logs and `llm_gateway_pii_events_total` similarly contain no matched values, prompts, tenant identifiers, or request identifiers. Pattern matching can produce false positives and false negatives; tune the enabled detectors and test against representative data. This feature is a data-minimization control, not a compliance certification.
+
 When `allow_client_bypass` is true, `Cache-Control: no-cache` or `no-store` bypasses both lookup and storage. Disable the feature for sensitive workloads that prohibit response retention. Cached copies omit upstream rate-limit metadata because it becomes stale immediately.
 
 Price fields are metadata expressed in USD per million tokens. Keep prices current when vendors change them.
