@@ -94,6 +94,24 @@ def test_gateway_request_context_is_never_forwarded_upstream(tmp_path, monkeypat
     assert "_gateway_request_context" not in upstream
 
 
+def test_chat_and_embedding_provider_defaults_are_isolated(tmp_path, monkeypatch):
+    monkeypatch.setenv("FREE_KEY", "secret")
+    definition = provider("free", "free", "FREE_KEY", [{
+        "name": "both", "upstream_model": "model", "capabilities": ["chat", "embeddings"],
+    }])
+    definition["request_defaults"] = {"temperature": 0.2}
+    definition["embeddings_request_defaults"] = {"encoding_format": "base64"}
+    config = make_config(tmp_path, [definition])
+    router = GatewayRouter(config, QuotaStore(config.database), httpx.AsyncClient())
+    candidate = router.candidates("both", False)[0]
+    chat_payload = router._upstream_payload(candidate, {"messages": []}, False)
+    embedding_payload = router._embedding_payload(candidate, {"input": "hello"})
+    assert chat_payload["temperature"] == 0.2
+    assert "encoding_format" not in chat_payload
+    assert embedding_payload["encoding_format"] == "base64"
+    assert "temperature" not in embedding_payload
+
+
 @pytest.mark.asyncio
 async def test_retryable_response_fails_over(tmp_path, monkeypatch):
     monkeypatch.setenv("FREE_KEY", "secret")
@@ -241,4 +259,57 @@ async def test_non_transient_error_does_not_retry(tmp_path, monkeypatch):
         with pytest.raises(Exception):
             await GatewayRouter(config, quota, client).complete({"model": "chat", "messages": []})
     assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_embeddings_use_capability_path_alias_and_usage_accounting(tmp_path, monkeypatch):
+    monkeypatch.setenv("FREE_KEY", "secret")
+    config = make_config(tmp_path, [provider(
+        "free", "free", "FREE_KEY",
+        [{
+            "name": "embed", "upstream_model": "vendor-embed",
+            "capabilities": ["embeddings"], "input_cost_per_million": 1,
+        }],
+    )])
+    seen = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["body"] = request.content
+        return httpx.Response(200, json={
+            "object": "list",
+            "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2]}],
+            "model": "vendor-embed",
+            "usage": {"prompt_tokens": 2, "total_tokens": 2},
+        })
+
+    quota = QuotaStore(config.database)
+    await quota.initialize()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        body, selected, upstream = await GatewayRouter(config, quota, client).embed_for({
+            "model": "embed", "input": "hello", "encoding_format": "float",
+        })
+    assert seen["path"].endswith("/v1/embeddings")
+    assert b'"model":"vendor-embed"' in seen["body"]
+    assert selected == "free"
+    assert upstream == "vendor-embed"
+    assert body["model"] == "embed"
+    assert body["gateway"]["provider"] == "free"
+    snapshot = await quota.snapshot()
+    assert snapshot[0]["tokens"] == 2
+
+
+def test_embedding_candidates_exclude_chat_only_models(tmp_path, monkeypatch):
+    monkeypatch.setenv("FREE_KEY", "secret")
+    config = make_config(tmp_path, [provider(
+        "free", "free", "FREE_KEY",
+        [
+            {"name": "chat", "upstream_model": "chat-model"},
+            {"name": "embed", "upstream_model": "embed-model", "capabilities": ["embeddings"]},
+        ],
+    )])
+    router = GatewayRouter(config, QuotaStore(config.database), httpx.AsyncClient())
+    assert [candidate.model.name for candidate in router.candidates(
+        "auto", False, required_capabilities={"embeddings"}
+    )] == ["embed"]
 

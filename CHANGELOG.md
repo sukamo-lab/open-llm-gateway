@@ -19,6 +19,7 @@ All notable product changes are recorded here. The project follows [Semantic Ver
 - Opt-in provider-neutral moderation policies with local baseline rules, custom terms, and safe audit metrics.
 - Opt-in prompt-injection risk scoring, warning, blocking, and operator-designated safe-model routing.
 - Feature-flagged Responses API adapter over the existing governed chat execution pipeline.
+- Feature-flagged embeddings API with capability routing, validation, accounting, retries, and failover.
 
 ## [0.5.0] - 2026-10-13
 

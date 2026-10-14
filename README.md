@@ -8,6 +8,7 @@ It has two explicit profiles: a minimal single-user mode and a fully managed mul
 
 - OpenAI-compatible chat completions, model listing, and SSE streaming.
 - Feature-flagged Responses API compatibility for non-streaming text, vision, reasoning, JSON, and function tools.
+- Feature-flagged embeddings API with batching, token-array input, quotas, retries, and free-first failover.
 - Capability-aware routing for chat, reasoning, vision, tools, and JSON workloads.
 - Strict free-before-paid ordering with optional prohibition of paid fallback.
 - Persistent atomic rolling quotas for requests and tokens.
@@ -69,6 +70,14 @@ To use the Responses compatibility endpoint, enable `features.responses_api` and
 ```powershell
 $body = @{ model = "auto"; input = "Hello" } | ConvertTo-Json
 Invoke-RestMethod http://localhost:8000/v1/responses `
+  -Method Post -Headers $headers -ContentType application/json -Body $body
+```
+
+For embeddings, enable `features.embeddings_api`, configure an `embeddings`-capable model, and call:
+
+```powershell
+$body = @{ model = "embed"; input = @("first text", "second text") } | ConvertTo-Json
+Invoke-RestMethod http://localhost:8000/v1/embeddings `
   -Method Post -Headers $headers -ContentType application/json -Body $body
 ```
 

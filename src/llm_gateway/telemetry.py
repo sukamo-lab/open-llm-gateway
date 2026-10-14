@@ -86,12 +86,13 @@ class Telemetry:
                 span.set_attribute("tenant.id", tenant_id)
 
     def start_provider(
-        self, provider: str, model: str, upstream_model: str, attempt: int
+        self, provider: str, model: str, upstream_model: str, attempt: int,
+        operation: str = "chat",
     ) -> SpanHandle:
         span = self.tracer.start_span(
             "llm.provider.request", kind=SpanKind.CLIENT,
             attributes={
-                "gen_ai.operation.name": "chat",
+                "gen_ai.operation.name": operation,
                 "gen_ai.provider.name": provider,
                 "gen_ai.request.model": upstream_model,
                 "llm.gateway.model.alias": model,

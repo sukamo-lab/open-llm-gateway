@@ -7,6 +7,7 @@
 - `GET /v1/models`: OpenAI-compatible model aliases.
 - `POST /v1/chat/completions`: OpenAI-compatible chat, including SSE streaming.
 - `POST /v1/responses`: optional Responses compatibility API for non-streaming text, vision, reasoning, JSON, and function-tool requests.
+- `POST /v1/embeddings`: optional OpenAI-compatible embeddings API with capability-aware routing and failover.
 - `GET /admin/providers`: configuration, circuit state, failures, and retry time; secrets are never returned.
 - `GET /admin/usage`: persistent request/token totals.
 - `GET /admin/usage/tenants`: tenant-attributed requests, tokens, and spend.

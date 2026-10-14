@@ -171,3 +171,46 @@ def test_responses_api_is_feature_flagged_and_uses_chat_pipeline(tmp_path, monke
     assert response.json()["gateway"]["provider"] == "p"
     assert response.json()["metadata"] == {"request": "demo"}
 
+
+def test_embeddings_api_is_feature_flagged_and_uses_router(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROVIDER_KEY", "secret")
+    disabled_config = tmp_path / "embeddings-disabled.yaml"
+    disabled_config.write_text(
+        "providers:\n  - name: p\n    base_url: https://example.test/v1\n"
+        "    api_key_env: PROVIDER_KEY\n    models:\n"
+        "      - {name: embed, upstream_model: model, capabilities: [embeddings]}\n",
+        encoding="utf-8",
+    )
+    with TestClient(create_app(str(disabled_config)), raise_server_exceptions=False) as client:
+        assert client.post("/v1/embeddings", json={"input": "hello"}).status_code == 404
+
+    enabled_config = tmp_path / "embeddings-enabled.yaml"
+    enabled_config.write_text(
+        "features:\n  embeddings_api: true\n"
+        "providers:\n  - name: p\n    base_url: https://example.test/v1\n"
+        "    api_key_env: PROVIDER_KEY\n    models:\n"
+        "      - {name: embed, upstream_model: model, capabilities: [embeddings]}\n",
+        encoding="utf-8",
+    )
+    captured = {}
+
+    async def embed_for(payload, _tenant_id, _limits):
+        captured.update(payload)
+        return ({
+            "object": "list", "model": "embed",
+            "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2]}],
+            "usage": {"prompt_tokens": 1, "total_tokens": 1},
+            "gateway": {"provider": "p", "upstream_model": "model"},
+        }, "p", "model")
+
+    with TestClient(create_app(str(enabled_config)), raise_server_exceptions=False) as client:
+        client.app.state.router.embed_for = embed_for
+        response = client.post("/v1/embeddings", json={
+            "model": "embed", "input": ["one", "two"],
+        })
+
+    assert response.status_code == 200
+    assert captured["input"] == ["one", "two"]
+    assert response.json()["data"][0]["embedding"] == [0.1, 0.2]
+    assert response.json()["gateway"]["provider"] == "p"
+

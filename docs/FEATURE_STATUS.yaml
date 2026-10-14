@@ -38,7 +38,19 @@ features:
       - tests/test_app.py
       - docs/CONFIGURATION.md
     notes: A feature-flagged non-streaming adapter supports text, message history, images by URL, reasoning effort, JSON formats, function tools/calls, usage, incomplete responses, and gateway metadata through the existing governed chat pipeline; streaming, hosted storage, background mode, file inputs, conversations, previous-response chaining, provider-native Responses passthrough, SDK compatibility CI, and live provider verification remain pending.
-  - {id: API-EMBED-001, pillar: unified_api, name: Embeddings API, status: planned, target: v0.8}
+  - id: API-EMBED-001
+    pillar: unified_api
+    name: Embeddings API
+    status: partial
+    target: v0.8
+    evidence:
+      - src/llm_gateway/embeddings_api.py
+      - src/llm_gateway/router.py
+      - src/llm_gateway/app.py
+      - tests/test_embeddings_api.py
+      - tests/test_router.py
+      - docs/CONFIGURATION.md
+    notes: A feature-flagged OpenAI-compatible endpoint supports bounded text batches and token arrays, float/base64 encodings, dimensions, capability-aware free-first routing, quotas and input-cost accounting, concurrency, retries, failover, circuit state, tracing, metrics, and input governance; full CI, live provider compatibility, endpoint-specific idempotency/cache behavior, SDK compatibility coverage, and latency benchmarks remain pending.
   - {id: API-MOD-001, pillar: unified_api, name: Moderation API, status: planned, target: v0.8}
   - {id: API-AUDIO-001, pillar: unified_api, name: Audio APIs, status: planned, target: v0.8}
   - {id: API-IMAGE-001, pillar: unified_api, name: Image generation API, status: planned, target: v0.8}

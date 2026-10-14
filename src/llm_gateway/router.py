@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import random
 import uuid
 import asyncio
@@ -185,6 +186,187 @@ class GatewayRouter:
 
     async def complete(self, payload: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
         return await self.complete_for(payload)
+
+    async def embed_for(
+        self, payload: dict[str, Any], consumer_id: str | None = None,
+        consumer_limits: tuple[Any, ...] = (),
+    ) -> tuple[dict[str, Any], str, str]:
+        requested_model = str(payload.get("model", "auto"))
+        requested_provider = payload.get("provider")
+        if requested_provider and not self.config.routing.allow_provider_override:
+            raise NoModelAvailable("provider override is disabled")
+        candidates = self.candidates(
+            requested_model, False, requested_provider, {"embeddings"}
+        )
+        estimate = self.estimate_embedding_tokens(payload.get("input"))
+        errors: list[str] = []
+        max_attempts = self.config.routing.max_attempts or len(candidates)
+        for candidate in candidates[:max_attempts]:
+            reservation = await self.quota.reserve(
+                candidate.provider, str(uuid.uuid4()), estimate, candidate.model.name,
+                candidate.model.input_cost_per_million, 0,
+                consumer_id, consumer_limits,
+            )
+            if reservation is None:
+                errors.append(f"{candidate.provider.name}: local quota exhausted")
+                continue
+            try:
+                async with self._semaphores[candidate.provider.name]:
+                    response, upstream_attempts = await self._post_with_retries(
+                        candidate, payload, "embeddings"
+                    )
+            except httpx.HTTPError as exc:
+                await self.quota.reconcile(reservation, None, False)
+                await self._failed(candidate)
+                if self.log_provider_attempts:
+                    logger.warning(
+                        "Embeddings provider request failed",
+                        extra={"event_name": "provider.request", "operation": "embeddings",
+                               "provider": candidate.provider.name, "model": candidate.model.name,
+                               "outcome": type(exc).__name__},
+                    )
+                errors.append(f"{candidate.provider.name}: {type(exc).__name__}")
+                continue
+            if response.is_error:
+                await self.quota.reconcile(reservation, None, False)
+                await self._failed(candidate)
+                detail = self.upstream_error(response)
+                if not self.config.observability.include_upstream_errors:
+                    detail = "upstream request failed"
+                if self.log_provider_attempts:
+                    logger.warning(
+                        "Embeddings provider returned an error",
+                        extra={"event_name": "provider.request", "operation": "embeddings",
+                               "provider": candidate.provider.name, "model": candidate.model.name,
+                               "http_status_code": response.status_code, "outcome": "error"},
+                    )
+                errors.append(f"{candidate.provider.name}: HTTP {response.status_code} - {detail}")
+                continue
+            try:
+                body = response.json()
+            except ValueError:
+                body = None
+            data = body.get("data") if isinstance(body, dict) else None
+            valid_data = isinstance(data, list) and bool(data) and all(
+                isinstance(item, dict)
+                and type(item.get("index")) is int
+                and item["index"] >= 0
+                and isinstance(item.get("embedding"), (list, str))
+                and (
+                    isinstance(item.get("embedding"), str) and bool(item["embedding"])
+                    or (
+                        bool(item["embedding"])
+                        and all(isinstance(value, (int, float)) and not isinstance(value, bool)
+                                and math.isfinite(float(value))
+                                for value in item["embedding"])
+                    )
+                )
+                for item in (data or [])
+            )
+            if valid_data:
+                encoding = payload.get("encoding_format", "float")
+                valid_data = all(
+                    isinstance(item["embedding"], str)
+                    if encoding == "base64" else isinstance(item["embedding"], list)
+                    for item in data
+                )
+            if valid_data and payload.get("dimensions") is not None:
+                valid_data = all(
+                    isinstance(item["embedding"], list)
+                    and len(item["embedding"]) == payload["dimensions"]
+                    for item in data
+                )
+            if valid_data and payload.get("encoding_format", "float") == "float":
+                valid_data = len({len(item["embedding"]) for item in data}) == 1
+            if valid_data:
+                input_value = payload.get("input")
+                if isinstance(input_value, str):
+                    expected_items = 1
+                elif (
+                    isinstance(input_value, list) and input_value
+                    and all(type(value) is int for value in input_value)
+                ):
+                    expected_items = 1
+                else:
+                    expected_items = len(input_value) if isinstance(input_value, list) else 0
+                valid_data = {item["index"] for item in data} == set(range(expected_items))
+            if not isinstance(body, dict) or not valid_data:
+                await self.quota.reconcile(reservation, None, False)
+                await self._failed(candidate)
+                errors.append(f"{candidate.provider.name}: upstream returned an invalid embeddings response")
+                continue
+            usage = body.get("usage") if isinstance(body.get("usage"), dict) else {}
+            try:
+                prompt_tokens = (
+                    int(usage.get("prompt_tokens") or usage.get("input_tokens"))
+                    if (
+                        usage.get("prompt_tokens") is not None
+                        or usage.get("input_tokens") is not None
+                    )
+                    else None
+                )
+                actual = (
+                    int(usage["total_tokens"])
+                    if usage.get("total_tokens") is not None else prompt_tokens
+                )
+                if (
+                    prompt_tokens is not None and prompt_tokens < 0
+                    or actual is not None and actual < 0
+                ):
+                    raise ValueError
+            except (TypeError, ValueError):
+                await self.quota.reconcile(reservation, None, False)
+                await self._failed(candidate)
+                errors.append(f"{candidate.provider.name}: upstream returned invalid embeddings usage")
+                continue
+            await self.quota.reconcile(
+                reservation, actual, True, prompt_tokens, 0,
+            )
+            await self._succeeded(candidate)
+            if self.log_provider_attempts:
+                logger.info(
+                    "Embeddings provider request completed",
+                    extra={"event_name": "provider.request", "operation": "embeddings",
+                           "provider": candidate.provider.name, "model": candidate.model.name,
+                           "http_status_code": response.status_code,
+                           "attempt": upstream_attempts, "outcome": "success"},
+                )
+            body["object"] = "list"
+            body["data"] = sorted(data, key=lambda item: item["index"])
+            for item in body["data"]:
+                item["object"] = "embedding"
+            reported_tokens = actual if actual is not None else estimate
+            body["usage"] = {
+                **usage,
+                "prompt_tokens": (
+                    prompt_tokens if prompt_tokens is not None else reported_tokens
+                ),
+                "total_tokens": reported_tokens,
+            }
+            body["model"] = candidate.model.name
+            body["gateway"] = {
+                "provider": candidate.provider.name,
+                "upstream_model": candidate.model.upstream_model,
+                "upstream_attempts": upstream_attempts,
+                "rate_limits": {
+                    key: value for key, value in response.headers.items()
+                    if key.lower().startswith(("x-ratelimit", "ratelimit"))
+                },
+            }
+            return body, candidate.provider.name, candidate.model.upstream_model
+        if errors and all("quota exhausted" in error for error in errors):
+            raise QuotaExceeded("; ".join(errors))
+        raise NoModelAvailable("; ".join(errors) or "no configured embeddings model matches this request")
+
+    @staticmethod
+    def estimate_embedding_tokens(input_value: Any) -> int:
+        if isinstance(input_value, str):
+            return max(1, len(input_value) // 3)
+        if isinstance(input_value, list):
+            if input_value and all(isinstance(item, int) for item in input_value):
+                return max(1, len(input_value))
+            return max(1, sum(GatewayRouter.estimate_embedding_tokens(item) for item in input_value))
+        return 1
 
     async def complete_for(
         self, payload: dict[str, Any], consumer_id: str | None = None,
@@ -387,7 +569,7 @@ class GatewayRouter:
         )
 
     async def _post_with_retries(
-        self, candidate: Candidate, payload: dict[str, Any]
+        self, candidate: Candidate, payload: dict[str, Any], operation: str = "chat"
     ) -> tuple[httpx.Response, int]:
         routing = self.config.routing
         started = time.monotonic()
@@ -401,16 +583,23 @@ class GatewayRouter:
             trace_handle = (
                 self.telemetry.start_provider(
                     candidate.provider.name, candidate.model.name,
-                    candidate.model.upstream_model, attempt,
+                    candidate.model.upstream_model, attempt, operation,
                 )
                 if self.telemetry is not None else None
             )
             attempt_started = time.monotonic()
             try:
                 response = await self.client.post(
-                    self._url(candidate.provider),
+                    (
+                        self._embeddings_url(candidate.provider)
+                        if operation == "embeddings" else self._url(candidate.provider)
+                    ),
                     headers=self._headers(candidate.provider),
-                    json=self._upstream_payload(candidate, payload, False),
+                    json=(
+                        self._embedding_payload(candidate, payload)
+                        if operation == "embeddings"
+                        else self._upstream_payload(candidate, payload, False)
+                    ),
                     timeout=timeout,
                 )
                 if trace_handle is not None:
@@ -490,6 +679,10 @@ class GatewayRouter:
         return f"{provider.base_url.rstrip('/')}/{provider.chat_completions_path.lstrip('/')}"
 
     @staticmethod
+    def _embeddings_url(provider: ProviderConfig) -> str:
+        return f"{provider.base_url.rstrip('/')}/{provider.embeddings_path.lstrip('/')}"
+
+    @staticmethod
     def _headers(provider: ProviderConfig) -> dict[str, str]:
         credential = provider.api_key() or ""
         value = f"{provider.api_key_prefix} {credential}".strip()
@@ -505,6 +698,20 @@ class GatewayRouter:
         result["model"] = candidate.model.upstream_model
         result["stream"] = stream
         result.pop("reasoning", None)
+        result.pop("provider", None)
+        for key in tuple(result):
+            if key.startswith("_gateway_"):
+                result.pop(key, None)
+        return result
+
+    @staticmethod
+    def _embedding_payload(candidate: Candidate, payload: dict[str, Any]) -> dict[str, Any]:
+        result = {
+            **candidate.provider.embeddings_request_defaults,
+            **candidate.model.request_overrides,
+            **payload,
+            "model": candidate.model.upstream_model,
+        }
         result.pop("provider", None)
         for key in tuple(result):
             if key.startswith("_gateway_"):
