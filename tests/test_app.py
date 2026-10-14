@@ -237,6 +237,35 @@ def test_audio_speech_is_feature_flagged_and_returns_binary(tmp_path, monkeypatc
     assert response.headers["content-type"].startswith("audio/mpeg")
 
 
+def test_image_generations_are_feature_flagged_and_use_router(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROVIDER_KEY", "secret")
+    disabled_path = tmp_path / "images-disabled.yaml"
+    provider_yaml = (
+        "providers:\n  - name: p\n    base_url: https://example.test/v1\n"
+        "    api_key_env: PROVIDER_KEY\n    models:\n"
+        "      - {name: image, upstream_model: image-v1, capabilities: [image_generation]}\n"
+    )
+    disabled_path.write_text(provider_yaml, encoding="utf-8")
+    with TestClient(create_app(str(disabled_path)), raise_server_exceptions=False) as client:
+        assert client.post("/v1/images/generations", json={"prompt": "x"}).status_code == 404
+
+    enabled_path = tmp_path / "images-enabled.yaml"
+    enabled_path.write_text("features:\n  images_api: true\n" + provider_yaml, encoding="utf-8")
+    with TestClient(create_app(str(enabled_path)), raise_server_exceptions=False) as client:
+        async def generate(payload, _tenant_id, _limits):
+            assert payload["n"] == 1
+            return ({
+                "created": 100,
+                "data": [{"url": "https://example.test/image.png"}],
+                "gateway": {"provider": "p", "upstream_model": "image-v1"},
+            }, "p", "image-v1")
+
+        client.app.state.router.generate_images_for = generate
+        response = client.post("/v1/images/generations", json={"prompt": "A lighthouse"})
+    assert response.status_code == 200
+    assert response.json()["gateway"]["provider"] == "p"
+
+
 def test_embeddings_api_is_feature_flagged_and_uses_router(tmp_path, monkeypatch):
     monkeypatch.setenv("PROVIDER_KEY", "secret")
     disabled_config = tmp_path / "embeddings-disabled.yaml"

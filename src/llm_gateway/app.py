@@ -483,6 +483,7 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                 **({"embeddings": "/v1/embeddings"} if config.features.embeddings_api else {}),
                 **({"moderations": "/v1/moderations"} if config.features.moderations_api else {}),
                 **({"audio_speech": "/v1/audio/speech"} if config.features.audio_api else {}),
+                **({"image_generations": "/v1/images/generations"} if config.features.images_api else {}),
                 "docs": "/docs" if config.server.docs_enabled else None,
             },
         }
@@ -1166,6 +1167,35 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             headers=headers,
         )
 
+    @app.post("/v1/images/generations")
+    async def image_generations(request: Request):
+        context = await require_api(request)
+        if request.headers.get("idempotency-key"):
+            raise HTTPException(400, "Idempotency-Key is not supported for image requests")
+        try:
+            raw_payload = await request.json()
+        except ValueError as exc:
+            raise HTTPException(400, "request body must contain valid JSON") from exc
+        if not isinstance(raw_payload, dict):
+            raise HTTPException(400, "request body must be a JSON object")
+        from .images_api import ImagesValidationError, validate_image_payload
+
+        try:
+            payload = validate_image_payload(raw_payload, config.images)
+        except ImagesValidationError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        router: GatewayRouter = request.app.state.router
+        tenant_limits = context.limits if config.features.tenant_quotas else ()
+        try:
+            body, _provider, _upstream_model = await router.generate_images_for(
+                payload, context.tenant_id, tenant_limits
+            )
+        except QuotaExceeded as exc:
+            raise HTTPException(429, str(exc)) from exc
+        except NoModelAvailable as exc:
+            raise HTTPException(503, str(exc)) from exc
+        return body
+
     disabled_paths: set[str] = set()
     if not config.features.admin_api:
         disabled_paths.update(
@@ -1192,6 +1222,8 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         disabled_paths.add("/v1/moderations")
     if not config.features.audio_api:
         disabled_paths.add("/v1/audio/speech")
+    if not config.features.images_api:
+        disabled_paths.add("/v1/images/generations")
     app.router.routes = [
         route for route in app.router.routes
         if getattr(route, "path", None) not in disabled_paths

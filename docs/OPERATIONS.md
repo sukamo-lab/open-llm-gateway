@@ -10,6 +10,7 @@
 - `POST /v1/embeddings`: optional OpenAI-compatible embeddings API with capability-aware routing and failover.
 - `POST /v1/moderations`: optional OpenAI-compatible deterministic text classification without an upstream provider call.
 - `POST /v1/audio/speech`: optional OpenAI-compatible text-to-speech with capability-aware routing and failover.
+- `POST /v1/images/generations`: optional OpenAI-compatible image generation returning URL or base64 data.
 - `GET /admin/providers`: configuration, circuit state, failures, and retry time; secrets are never returned.
 - `GET /admin/usage`: persistent request/token totals.
 - `GET /admin/usage/tenants`: tenant-attributed requests, tokens, and spend.

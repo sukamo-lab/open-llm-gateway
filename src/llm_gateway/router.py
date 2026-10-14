@@ -416,6 +416,79 @@ class GatewayRouter:
             raise QuotaExceeded("; ".join(errors))
         raise NoModelAvailable("; ".join(errors) or "no configured speech model matches this request")
 
+    async def generate_images_for(
+        self, payload: dict[str, Any], consumer_id: str | None = None,
+        consumer_limits: tuple[Any, ...] = (),
+    ) -> tuple[dict[str, Any], str, str]:
+        from .images_api import validate_image_response
+
+        requested_model = str(payload.get("model", "auto"))
+        requested_provider = payload.get("provider")
+        if requested_provider and not self.config.routing.allow_provider_override:
+            raise NoModelAvailable("provider override is disabled")
+        candidates = self.candidates(
+            requested_model, False, requested_provider, {"image_generation"}
+        )
+        estimate = max(1, len(str(payload.get("prompt", ""))) // 3)
+        errors: list[str] = []
+        max_attempts = self.config.routing.max_attempts or len(candidates)
+        for candidate in candidates[:max_attempts]:
+            reservation = await self.quota.reserve(
+                candidate.provider, str(uuid.uuid4()), estimate, candidate.model.name,
+                candidate.model.input_cost_per_million, candidate.model.output_cost_per_million,
+                consumer_id, consumer_limits,
+            )
+            if reservation is None:
+                errors.append(f"{candidate.provider.name}: local quota exhausted")
+                continue
+            try:
+                async with self._semaphores[candidate.provider.name]:
+                    response, attempts = await self._post_with_retries(
+                        candidate, payload, "image_generation"
+                    )
+            except httpx.HTTPError as exc:
+                await self.quota.reconcile(reservation, None, False)
+                await self._failed(candidate)
+                errors.append(f"{candidate.provider.name}: {type(exc).__name__}")
+                continue
+            if response.is_error:
+                await self.quota.reconcile(reservation, None, False)
+                await self._failed(candidate)
+                detail = self.upstream_error(response)
+                if not self.config.observability.include_upstream_errors:
+                    detail = "upstream request failed"
+                errors.append(f"{candidate.provider.name}: HTTP {response.status_code} - {detail}")
+                continue
+            if len(response.content) > self.config.images.max_response_bytes:
+                await self.quota.reconcile(reservation, None, False)
+                await self._failed(candidate)
+                errors.append(f"{candidate.provider.name}: upstream image response exceeds configured limit")
+                continue
+            try:
+                body = response.json()
+            except ValueError:
+                body = None
+            if not validate_image_response(body, payload["n"], payload["response_format"]):
+                await self.quota.reconcile(reservation, None, False)
+                await self._failed(candidate)
+                errors.append(f"{candidate.provider.name}: upstream returned invalid image data")
+                continue
+            await self.quota.reconcile(reservation, estimate, True, estimate, 0)
+            await self._succeeded(candidate)
+            body["gateway"] = {
+                "provider": candidate.provider.name,
+                "upstream_model": candidate.model.upstream_model,
+                "upstream_attempts": attempts,
+                "rate_limits": {
+                    key: value for key, value in response.headers.items()
+                    if key.lower().startswith(("x-ratelimit", "ratelimit"))
+                },
+            }
+            return body, candidate.provider.name, candidate.model.upstream_model
+        if errors and all("quota exhausted" in error for error in errors):
+            raise QuotaExceeded("; ".join(errors))
+        raise NoModelAvailable("; ".join(errors) or "no configured image model matches this request")
+
     @staticmethod
     def estimate_embedding_tokens(input_value: Any) -> int:
         if isinstance(input_value, str):
@@ -741,6 +814,8 @@ class GatewayRouter:
             path = provider.embeddings_path
         elif operation == "audio_speech":
             path = provider.audio_speech_path
+        elif operation == "image_generation":
+            path = provider.image_generations_path
         else:
             path = provider.chat_completions_path
         return f"{provider.base_url.rstrip('/')}/{path.lstrip('/')}"
@@ -790,6 +865,18 @@ class GatewayRouter:
         if operation == "audio_speech":
             result = {
                 **candidate.provider.audio_speech_request_defaults,
+                **candidate.model.request_overrides,
+                **payload,
+                "model": candidate.model.upstream_model,
+            }
+            result.pop("provider", None)
+            for key in tuple(result):
+                if key.startswith("_gateway_"):
+                    result.pop(key, None)
+            return result
+        if operation == "image_generation":
+            result = {
+                **candidate.provider.image_request_defaults,
                 **candidate.model.request_overrides,
                 **payload,
                 "model": candidate.model.upstream_model,

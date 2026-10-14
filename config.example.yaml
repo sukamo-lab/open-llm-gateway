@@ -24,6 +24,7 @@ features:
   embeddings_api: false
   moderations_api: false
   audio_api: false
+  images_api: false
 
 server:
   host: 0.0.0.0
@@ -154,6 +155,12 @@ audio:
   max_input_characters: 4096
   response_formats: [mp3, opus, aac, flac, wav, pcm]
   max_response_bytes: 25000000
+
+images:
+  max_prompt_characters: 32000
+  max_images: 4
+  max_response_bytes: 50000000
+  response_formats: [url, b64_json]
 
 providers:
   - name: google-free

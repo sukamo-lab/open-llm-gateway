@@ -34,6 +34,7 @@ class ModelConfig(StrictModel):
     priority: int = 100
     capabilities: set[Literal[
         "chat", "reasoning", "vision", "tools", "json", "embeddings", "audio_speech",
+        "image_generation",
     ]] = Field(
         default_factory=lambda: {"chat", "vision", "tools", "json"}
     )
@@ -55,6 +56,7 @@ class ProviderConfig(StrictModel):
     chat_completions_path: str = "/chat/completions"
     embeddings_path: str = "/embeddings"
     audio_speech_path: str = "/audio/speech"
+    image_generations_path: str = "/images/generations"
     api_key_env: str | None = None
     api_key_file: str | None = None
     api_key_value: str | None = None
@@ -67,6 +69,7 @@ class ProviderConfig(StrictModel):
     request_defaults: dict[str, object] = Field(default_factory=dict)
     embeddings_request_defaults: dict[str, object] = Field(default_factory=dict)
     audio_speech_request_defaults: dict[str, object] = Field(default_factory=dict)
+    image_request_defaults: dict[str, object] = Field(default_factory=dict)
     limits: list[Limit] = Field(default_factory=list)
     max_concurrency: int = Field(default=10, gt=0)
     failure_threshold: int = Field(default=3, gt=0)
@@ -119,6 +122,7 @@ class GatewayConfig(StrictModel):
     embeddings: "EmbeddingsConfig" = Field(default_factory=lambda: EmbeddingsConfig())
     moderations_api: "ModerationsAPIConfig" = Field(default_factory=lambda: ModerationsAPIConfig())
     audio: "AudioConfig" = Field(default_factory=lambda: AudioConfig())
+    images: "ImagesConfig" = Field(default_factory=lambda: ImagesConfig())
     features: "FeatureConfig" = Field(default_factory=lambda: FeatureConfig())
     providers: list[ProviderConfig]
 
@@ -145,6 +149,7 @@ class GatewayConfig(StrictModel):
                 "embeddings_api": False,
                 "moderations_api": False,
                 "audio_api": False,
+                "images_api": False,
             },
             "multi": {
                 "authentication": True, "admin_api": True, "managed_keys": True,
@@ -161,6 +166,7 @@ class GatewayConfig(StrictModel):
                 "embeddings_api": False,
                 "moderations_api": False,
                 "audio_api": False,
+                "images_api": False,
             },
         }[self.mode]
         for name, default in defaults.items():
@@ -247,6 +253,12 @@ class GatewayConfig(StrictModel):
             for model in provider.models
         ):
             issues.append(("ERROR", "audio API has no enabled speech-capable model"))
+        if self.features.images_api and not any(
+            "image_generation" in model.capabilities
+            for provider in self.providers if provider.enabled
+            for model in provider.models
+        ):
+            issues.append(("ERROR", "images API has no enabled image-generation-capable model"))
         endpoint = self.telemetry.endpoint()
         if self.features.tracing and endpoint and endpoint.startswith("http://"):
             issues.append(("WARN", "OpenTelemetry exporter endpoint is not encrypted"))
@@ -512,6 +524,15 @@ class AudioConfig(StrictModel):
     max_response_bytes: int = Field(default=25_000_000, ge=1024, le=500_000_000)
 
 
+class ImagesConfig(StrictModel):
+    max_prompt_characters: int = Field(default=32_000, ge=1, le=1_000_000)
+    max_images: int = Field(default=4, ge=1, le=100)
+    max_response_bytes: int = Field(default=50_000_000, ge=1024, le=500_000_000)
+    response_formats: set[Literal["url", "b64_json"]] = Field(
+        default_factory=lambda: {"url", "b64_json"}
+    )
+
+
 class FeatureConfig(StrictModel):
     authentication: bool | None = None
     admin_api: bool | None = None
@@ -533,6 +554,7 @@ class FeatureConfig(StrictModel):
     embeddings_api: bool | None = None
     moderations_api: bool | None = None
     audio_api: bool | None = None
+    images_api: bool | None = None
 
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")

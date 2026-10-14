@@ -340,3 +340,33 @@ async def test_speech_uses_capability_path_alias_and_binary_response(tmp_path, m
     assert content == b"audio-bytes"
     assert (selected, upstream) == ("free", "vendor-tts")
 
+
+@pytest.mark.asyncio
+async def test_images_use_capability_path_alias_and_validate_response(tmp_path, monkeypatch):
+    monkeypatch.setenv("FREE_KEY", "secret")
+    config = make_config(tmp_path, [provider(
+        "free", "free", "FREE_KEY",
+        [{"name": "image", "upstream_model": "vendor-image", "capabilities": ["image_generation"]}],
+    )])
+    config.features.images_api = True
+    seen = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["body"] = request.content
+        return httpx.Response(200, json={
+            "created": 100, "data": [{"url": "https://example.test/image.png"}],
+        })
+
+    quota = QuotaStore(config.database)
+    await quota.initialize()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        body, selected, upstream = await GatewayRouter(config, quota, client).generate_images_for({
+            "model": "image", "prompt": "lighthouse", "n": 1, "response_format": "url",
+        })
+    assert seen["path"].endswith("/v1/images/generations")
+    assert b'"model":"vendor-image"' in seen["body"]
+    assert body["data"][0]["url"].endswith("image.png")
+    assert body["gateway"]["provider"] == "free"
+    assert (selected, upstream) == ("free", "vendor-image")
+
