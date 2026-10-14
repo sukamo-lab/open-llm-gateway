@@ -51,7 +51,19 @@ features:
       - tests/test_router.py
       - docs/CONFIGURATION.md
     notes: A feature-flagged OpenAI-compatible endpoint supports bounded text batches and token arrays, float/base64 encodings, dimensions, capability-aware free-first routing, quotas and input-cost accounting, concurrency, retries, failover, circuit state, tracing, metrics, and input governance; full CI, live provider compatibility, endpoint-specific idempotency/cache behavior, SDK compatibility coverage, and latency benchmarks remain pending.
-  - {id: API-MOD-001, pillar: unified_api, name: Moderation API, status: planned, target: v0.8}
+  - id: API-MOD-001
+    pillar: unified_api
+    name: Moderation API
+    status: partial
+    target: v0.8
+    evidence:
+      - src/llm_gateway/moderations_api.py
+      - src/llm_gateway/app.py
+      - src/llm_gateway/config.py
+      - tests/test_moderations_api.py
+      - tests/test_app.py
+      - docs/CONFIGURATION.md
+    notes: A feature-flagged OpenAI-compatible text moderation endpoint uses the bounded deterministic local engine with batched classification, accepted model aliases, content-free metrics, and explicit rule-score semantics; image moderation, provider-native adapters, calibrated probabilistic scores, full CI, SDK compatibility, latency benchmarks, and governed corpus validation remain pending.
   - {id: API-AUDIO-001, pillar: unified_api, name: Audio APIs, status: planned, target: v0.8}
   - {id: API-IMAGE-001, pillar: unified_api, name: Image generation API, status: planned, target: v0.8}
   - id: API-IDEMP-001

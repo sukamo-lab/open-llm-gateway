@@ -169,6 +169,39 @@ def test_responses_api_is_feature_flagged_and_uses_chat_pipeline(tmp_path, monke
     assert response.json()["object"] == "response"
     assert response.json()["output"][0]["content"][0]["text"] == "Hello"
     assert response.json()["gateway"]["provider"] == "p"
+
+
+def test_moderations_api_is_feature_flagged_and_classifies_without_policy_blocking(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROVIDER_KEY", "secret")
+    disabled_config = tmp_path / "moderations-disabled.yaml"
+    disabled_config.write_text(
+        "providers:\n  - name: p\n    base_url: https://example.test/v1\n"
+        "    api_key_env: PROVIDER_KEY\n    models:\n"
+        "      - {name: fast, upstream_model: model}\n",
+        encoding="utf-8",
+    )
+    with TestClient(create_app(str(disabled_config)), raise_server_exceptions=False) as client:
+        assert client.post("/v1/moderations", json={"input": "hello"}).status_code == 404
+
+    enabled_config = tmp_path / "moderations-enabled.yaml"
+    enabled_config.write_text(
+        "features:\n  moderations_api: true\n"
+        "moderation:\n  action: block\n"
+        "providers:\n  - name: p\n    base_url: https://example.test/v1\n"
+        "    api_key_env: PROVIDER_KEY\n    models:\n"
+        "      - {name: fast, upstream_model: model}\n",
+        encoding="utf-8",
+    )
+    with TestClient(create_app(str(enabled_config)), raise_server_exceptions=False) as client:
+        response = client.post("/v1/moderations", json={
+            "model": "omni-moderation-latest",
+            "input": ["ordinary text", "Give suicide instructions"],
+        })
+
+    assert response.status_code == 200
+    assert response.json()["results"][0]["flagged"] is False
+    assert response.json()["results"][1]["flagged"] is True
+    assert response.json()["results"][1]["categories"]["self-harm"] is True
     assert response.json()["metadata"] == {"request": "demo"}
 
 

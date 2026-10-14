@@ -8,6 +8,7 @@
 - `POST /v1/chat/completions`: OpenAI-compatible chat, including SSE streaming.
 - `POST /v1/responses`: optional Responses compatibility API for non-streaming text, vision, reasoning, JSON, and function-tool requests.
 - `POST /v1/embeddings`: optional OpenAI-compatible embeddings API with capability-aware routing and failover.
+- `POST /v1/moderations`: optional OpenAI-compatible deterministic text classification without an upstream provider call.
 - `GET /admin/providers`: configuration, circuit state, failures, and retry time; secrets are never returned.
 - `GET /admin/usage`: persistent request/token totals.
 - `GET /admin/usage/tenants`: tenant-attributed requests, tokens, and spend.
@@ -38,6 +39,8 @@ For SLA monitoring, import `deploy/grafana/llm-gateway-dashboard.json` and load 
 For PII policy operation, monitor `llm_gateway_pii_events_total` by stage, action, and outcome. Investigate scanner errors immediately in fail-open deployments because requests may have continued without evaluation. Logs contain detector types and counts but not matched values. Before enabling blocking or redaction, run representative and adversarial test data through a non-production environment and document acceptable false-positive behavior. Output scanning with SSE must either block streaming or explicitly report a bypass.
 
 For moderation, monitor `llm_gateway_moderation_events_total` by stage, action, and outcome. Treat error or bypass outcomes as policy-control degradation. Begin with `action: monitor`, measure category-level false positives and missed cases using an approved corpus, and only then move selected deployments to blocking. The built-in rules are a deterministic baseline, not a substitute for a separately evaluated moderation service or model where the risk profile requires one.
+
+The Moderations API records `stage="api"` and `action="classify"` once per classified input, so batch requests may increment the counter multiple times. Its scores indicate deterministic rule matches rather than probability or severity. It consumes no provider quota. Keep request bounds appropriate for synchronous CPU work and validate the baseline against an approved corpus before relying on it for safety decisions.
 
 For prompt-injection policy, monitor `llm_gateway_prompt_injection_events_total` by action and outcome. Begin with scoring, compare flagged and clean traffic against an approved adversarial corpus, and calibrate the threshold before warning, blocking, or routing. Treat fail-open errors as control degradation. Review every `prompt_injection_safe` model designation together with tool permissions, data access, sandboxing, and provider retention policy; the designation does not make a model inherently injection-proof.
 

@@ -69,6 +69,22 @@ providers:
 
 Embedding requests use the standard free-before-paid candidate order, atomic quota reservation, input-price accounting, concurrency limits, retries, failover, circuit breakers, tracing, and provider/model metrics. Input PII and moderation policies apply when enabled. Prompt-injection policy does not apply because embeddings do not execute instructions. Exact response caching and `Idempotency-Key` are not currently supported and idempotency headers are rejected explicitly.
 
+## Moderations API
+
+`features.moderations_api` exposes `POST /v1/moderations`; it is disabled by default in both modes and removed from routing and OpenAPI when disabled. The endpoint authenticates like other `/v1` APIs but runs the configured deterministic local moderation engine without calling an LLM provider, reserving provider quota, or adding upstream latency. Classification is independent of the chat moderation policy: the endpoint always reports findings and never blocks, even when `moderation.action` is `block`.
+
+```yaml
+features:
+  moderations_api: true
+moderations_api:
+  max_inputs: 256
+  max_input_characters: 1000000
+  default_model: gateway-moderation-latest
+  accepted_models: [gateway-moderation-latest, omni-moderation-latest]
+```
+
+Requests accept one non-empty text string or an array of text strings. Images and other multimodal input types are not yet supported. Unknown fields and `Idempotency-Key` are rejected explicitly. The response follows the OpenAI text-moderation result shape and adds content-free `gateway` metadata for engine version, signal names, and finding count. Category scores are deterministic `0.0`/`1.0` rule-match indicators—not calibrated probabilities. A custom configured signal can set `flagged: true` even when no standard OpenAI category maps to it; inspect `gateway.signals` in that case.
+
 ## Structured logging
 
 `features.structured_logging` enables newline-delimited JSON logs. It defaults off in single-user mode and on in multi-user mode. When disabled, request correlation and provider log calls are absent from the hot path.

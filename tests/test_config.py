@@ -206,3 +206,17 @@ def test_embeddings_api_is_opt_in_and_limits_are_validated():
         for severity, message in config.diagnostics()
     )
 
+
+def test_moderations_api_is_opt_in_and_model_aliases_are_validated():
+    provider = {
+        "name": "p", "base_url": "https://example.test/v1", "api_key_value": "key",
+        "models": [{"name": "fast", "upstream_model": "model"}],
+    }
+    assert GatewayConfig.model_validate({"mode": "single", "providers": [provider]}).features.moderations_api is False
+    assert GatewayConfig.model_validate({"mode": "multi", "providers": [provider]}).features.moderations_api is False
+    with pytest.raises(ValidationError, match="default_model"):
+        GatewayConfig.model_validate({
+            "moderations_api": {"default_model": "missing", "accepted_models": ["other"]},
+            "providers": [provider],
+        })
+
