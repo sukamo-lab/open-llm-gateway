@@ -25,6 +25,7 @@ features:
   moderations_api: false
   audio_api: false
   images_api: false
+  model_discovery: false
 
 server:
   host: 0.0.0.0
@@ -161,6 +162,13 @@ images:
   max_images: 4
   max_response_bytes: 50000000
   response_formats: [url, b64_json]
+
+model_discovery:
+  allow_patterns: ["*"]
+  deny_patterns: []
+  max_models_per_provider: 10000
+  max_concurrency: 8
+  approval_mode: report_only
 
 providers:
   - name: google-free

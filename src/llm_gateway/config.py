@@ -57,6 +57,8 @@ class ProviderConfig(StrictModel):
     embeddings_path: str = "/embeddings"
     audio_speech_path: str = "/audio/speech"
     image_generations_path: str = "/images/generations"
+    models_path: str = "/models"
+    discovery_enabled: bool = True
     api_key_env: str | None = None
     api_key_file: str | None = None
     api_key_value: str | None = None
@@ -123,6 +125,7 @@ class GatewayConfig(StrictModel):
     moderations_api: "ModerationsAPIConfig" = Field(default_factory=lambda: ModerationsAPIConfig())
     audio: "AudioConfig" = Field(default_factory=lambda: AudioConfig())
     images: "ImagesConfig" = Field(default_factory=lambda: ImagesConfig())
+    model_discovery: "ModelDiscoveryConfig" = Field(default_factory=lambda: ModelDiscoveryConfig())
     features: "FeatureConfig" = Field(default_factory=lambda: FeatureConfig())
     providers: list[ProviderConfig]
 
@@ -150,6 +153,7 @@ class GatewayConfig(StrictModel):
                 "moderations_api": False,
                 "audio_api": False,
                 "images_api": False,
+                "model_discovery": False,
             },
             "multi": {
                 "authentication": True, "admin_api": True, "managed_keys": True,
@@ -167,6 +171,7 @@ class GatewayConfig(StrictModel):
                 "moderations_api": False,
                 "audio_api": False,
                 "images_api": False,
+                "model_discovery": False,
             },
         }[self.mode]
         for name, default in defaults.items():
@@ -180,6 +185,8 @@ class GatewayConfig(StrictModel):
             raise ValueError("tenant_quotas requires managed_keys")
         if self.features.cost_tracking and not self.features.usage_accounting:
             raise ValueError("cost_tracking requires usage_accounting")
+        if self.features.model_discovery and not self.features.admin_api:
+            raise ValueError("model_discovery requires admin_api")
         if self.features.exact_cache and self.cache.backend == "redis" and not self.cache.redis_url():
             raise ValueError(f"exact_cache Redis backend requires {self.cache.redis_url_env}")
         return self
@@ -533,6 +540,21 @@ class ImagesConfig(StrictModel):
     )
 
 
+class ModelDiscoveryConfig(StrictModel):
+    allow_patterns: list[str] = Field(default_factory=lambda: ["*"])
+    deny_patterns: list[str] = Field(default_factory=list)
+    max_models_per_provider: int = Field(default=10_000, ge=1, le=100_000)
+    max_concurrency: int = Field(default=8, ge=1, le=100)
+    approval_mode: Literal["report_only"] = "report_only"
+
+    @model_validator(mode="after")
+    def valid_patterns(self) -> "ModelDiscoveryConfig":
+        patterns = self.allow_patterns + self.deny_patterns
+        if not self.allow_patterns or any(not item or len(item) > 256 for item in patterns):
+            raise ValueError("model discovery patterns must be bounded non-empty strings")
+        return self
+
+
 class FeatureConfig(StrictModel):
     authentication: bool | None = None
     admin_api: bool | None = None
@@ -555,6 +577,7 @@ class FeatureConfig(StrictModel):
     moderations_api: bool | None = None
     audio_api: bool | None = None
     images_api: bool | None = None
+    model_discovery: bool | None = None
 
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")

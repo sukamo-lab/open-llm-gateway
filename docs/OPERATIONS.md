@@ -12,6 +12,7 @@
 - `POST /v1/audio/speech`: optional OpenAI-compatible text-to-speech with capability-aware routing and failover.
 - `POST /v1/images/generations`: optional OpenAI-compatible image generation returning URL or base64 data.
 - `GET /admin/providers`: configuration, circuit state, failures, and retry time; secrets are never returned.
+- `POST /admin/model-discovery`: optional read-only upstream catalog drift report.
 - `GET /admin/usage`: persistent request/token totals.
 - `GET /admin/usage/tenants`: tenant-attributed requests, tokens, and spend.
 - `/admin/tenants` and `/admin/keys/*`: tenant and consumer-key lifecycle.
@@ -25,6 +26,8 @@ With `features.structured_logging`, each request emits one JSON completion event
 ## Preflight
 
 `llm-gateway --check` performs strict YAML/schema/secret-source validation. `llm-gateway --doctor` additionally reports unsafe deployment choices and verifies SQLite/PostgreSQL connectivity plus schema initialization. It exits nonzero on errors, making it suitable for CI and container pre-deployment checks. `llm-gateway --generate-secret` prints a cryptographically random secret.
+
+Model discovery is operator-triggered and read-only. Protect it with the admin API credential in authenticated deployments. Review `unconfigured` models before adding explicit aliases and capabilities to configuration; discovery never activates a model or changes routing. An upstream failure is isolated to that provider's report so other catalogs remain visible.
 
 `llm-gateway --init --init-mode single` creates the no-database minimal profile. `--init-mode multi` creates secured consumer/admin credentials and enables the managed feature set.
 

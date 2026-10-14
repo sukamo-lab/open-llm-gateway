@@ -244,3 +244,16 @@ def test_images_api_is_opt_in_and_requires_capable_model():
     assert any("image-generation-capable" in message for _severity, message in config.diagnostics())
     assert GatewayConfig.model_validate({"providers": [provider]}).features.images_api is False
 
+
+def test_model_discovery_is_opt_in_and_requires_admin_api():
+    provider = {
+        "name": "p", "base_url": "https://example.test/v1", "api_key_value": "key",
+        "models": [{"name": "fast", "upstream_model": "model"}],
+    }
+    assert GatewayConfig.model_validate({"providers": [provider]}).features.model_discovery is False
+    with pytest.raises(ValidationError, match="requires admin_api"):
+        GatewayConfig.model_validate({
+            "features": {"model_discovery": True, "admin_api": False},
+            "providers": [provider],
+        })
+
