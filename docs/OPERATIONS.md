@@ -27,6 +27,8 @@ With `features.structured_logging`, each request emits one JSON completion event
 
 When idempotency is enabled, monitor database growth and choose a TTL appropriate for client retry windows. PostgreSQL coordinates claims across replicas. SQLite is suitable only for a single gateway process. Treat HTTP 409 with `Retry-After` as an in-progress duplicate and retry later using the same key and unchanged body.
 
+For exact caching, use the memory backend only for a single process. Use PostgreSQL or Redis for multiple replicas, monitor hit ratio and retained bytes at the backend, and increment `cache.namespace` for an immediate logical invalidation. Provider/model configuration changes invalidate keys automatically. Redis must enforce its own authentication, TLS, network policy, memory limit, and eviction policy.
+
 ## Production checklist
 
 1. Copy `config.example.yaml` and `.env.example`; keep both real files out of source control.

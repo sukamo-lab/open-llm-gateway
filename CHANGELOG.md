@@ -12,6 +12,7 @@ All notable product changes are recorded here. The project follows [Semantic Ver
 - Structured JSON logging with request, tenant, and provider correlation.
 - Persistent tenant-scoped idempotency for non-streaming chat completions.
 - Reproducible, attested, keylessly signed release workflow.
+- Tenant-isolated exact response caching with memory, SQLite, PostgreSQL, and Redis backends.
 
 ## [0.5.0] - 2026-10-13
 

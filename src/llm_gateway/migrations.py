@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-LATEST_VERSIONS = {"usage": 1, "identity": 1, "idempotency": 1}
+LATEST_VERSIONS = {"usage": 1, "identity": 1, "idempotency": 1, "cache": 1}
 
 
 def _validate_components(components: Iterable[str]) -> tuple[str, ...]:
@@ -93,10 +93,22 @@ def _sqlite_idempotency_v1(db: sqlite3.Connection) -> None:
     )
 
 
+def _sqlite_cache_v1(db: sqlite3.Connection) -> None:
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS exact_cache_entries (
+        tenant_id TEXT NOT NULL, cache_key TEXT NOT NULL,
+        response_json TEXT NOT NULL, created_at REAL NOT NULL,
+        expires_at REAL NOT NULL, PRIMARY KEY(tenant_id,cache_key))"""
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS exact_cache_expiry ON exact_cache_entries(expires_at)")
+    db.execute("CREATE INDEX IF NOT EXISTS exact_cache_created ON exact_cache_entries(created_at)")
+
+
 SQLITE_MIGRATIONS = {
     "usage": {1: _sqlite_usage_v1},
     "identity": {1: _sqlite_identity_v1},
     "idempotency": {1: _sqlite_idempotency_v1},
+    "cache": {1: _sqlite_cache_v1},
 }
 
 
@@ -236,6 +248,19 @@ async def _postgres_migration(db, component: str, version: int) -> None:
             );
             CREATE INDEX IF NOT EXISTS idempotency_expiry
               ON idempotency_records(expires_at);"""
+        )
+    elif (component, version) == ("cache", 1):
+        await db.execute(
+            """CREATE TABLE IF NOT EXISTS exact_cache_entries (
+              tenant_id TEXT NOT NULL, cache_key TEXT NOT NULL,
+              response_json TEXT NOT NULL, created_at DOUBLE PRECISION NOT NULL,
+              expires_at DOUBLE PRECISION NOT NULL,
+              PRIMARY KEY(tenant_id,cache_key)
+            );
+            CREATE INDEX IF NOT EXISTS exact_cache_expiry
+              ON exact_cache_entries(expires_at);
+            CREATE INDEX IF NOT EXISTS exact_cache_created
+              ON exact_cache_entries(created_at);"""
         )
     else:
         raise RuntimeError(f"missing PostgreSQL migration {component} version {version}")

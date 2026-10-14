@@ -22,6 +22,8 @@ def storage_components(config) -> tuple[str, ...]:
         components.append("identity")
     if config.features.idempotency:
         components.append("idempotency")
+    if config.features.exact_cache and config.cache.backend == "database":
+        components.append("cache")
     return tuple(components)
 
 
@@ -68,6 +70,7 @@ features:
   circuit_breaker: true
   structured_logging: false
   idempotency: false
+  exact_cache: false
 server:
   host: 127.0.0.1
   port: 8000

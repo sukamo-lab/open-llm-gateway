@@ -141,14 +141,69 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             config.database, config.idempotency.ttl_seconds,
             config.idempotency.lease_seconds,
         )
+    cache_store = None
+    cache_available = False
+    cache_routing_signature = ""
+    if config.features.exact_cache:
+        from .cache import MemoryCacheStore, PostgresCacheStore, RedisCacheStore, SQLiteCacheStore
+
+        if config.cache.backend == "memory":
+            cache_store = MemoryCacheStore(config.cache.ttl_seconds, config.cache.max_entries)
+        elif config.cache.backend == "redis":
+            cache_store = RedisCacheStore(
+                config.cache.redis_url() or "", config.cache.ttl_seconds, config.cache.redis_prefix
+            )
+        elif config.database.startswith(("postgresql://", "postgres://")):
+            cache_store = PostgresCacheStore(
+                config.database, config.cache.ttl_seconds, config.cache.max_entries
+            )
+        else:
+            cache_store = SQLiteCacheStore(
+                config.database, config.cache.ttl_seconds, config.cache.max_entries
+            )
+        routing_material = {
+            "paid_fallback": config.routing.paid_fallback,
+            "providers": [
+                {
+                    "name": provider.name, "enabled": provider.enabled, "tier": provider.tier,
+                    "base_url": provider.base_url, "path": provider.chat_completions_path,
+                    "defaults": provider.request_defaults,
+                    "models": [
+                        {
+                            "name": model.name, "upstream": model.upstream_model,
+                            "priority": model.priority, "capabilities": sorted(model.capabilities),
+                            "overrides": model.request_overrides,
+                        }
+                        for model in provider.models
+                    ],
+                }
+                for provider in config.providers
+            ],
+        }
+        cache_routing_signature = hashlib.sha256(
+            json.dumps(routing_material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        cache_available = True
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        nonlocal cache_available
         await quota.initialize()
         if identities is not None and identities is not quota:
             await identities.initialize()
         if idempotency_store is not None:
             await idempotency_store.initialize()
+        if cache_store is not None:
+            try:
+                await cache_store.initialize()
+            except Exception as exc:
+                if config.cache.failure_mode == "closed":
+                    raise
+                cache_available = False
+                logger.error(
+                    "Exact cache initialization failed; continuing with cache disabled error_type=%s",
+                    type(exc).__name__,
+                )
         removed = await quota.cleanup(
             time.time() - config.accounting.retention_days * 86400
         )
@@ -167,6 +222,8 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             await close()
         if idempotency_store is not None:
             await idempotency_store.close()
+        if cache_store is not None:
+            await cache_store.close()
 
     app = FastAPI(
         title="LLM Gateway", version=__version__, lifespan=lifespan,
@@ -427,7 +484,10 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                 async for chunk in iterator:
                     yield chunk
 
-            return StreamingResponse(replay(), media_type="text/event-stream")
+            response = StreamingResponse(replay(), media_type="text/event-stream")
+            if cache_store is not None:
+                response.headers["X-Cache"] = "BYPASS"
+            return response
         idempotency_digest = None
         owner_token = None
         if idempotency_key and idempotency_store is not None:
@@ -456,6 +516,52 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                         headers={"Retry-After": "1"},
                     )
                 await asyncio.sleep(config.idempotency.poll_interval_seconds)
+        cache_key = None
+        cache_allowed = cache_store is not None and cache_available
+        cache_control = request.headers.get("cache-control", "").lower()
+        if config.cache.allow_client_bypass and any(
+            directive.strip() in {"no-cache", "no-store"}
+            for directive in cache_control.split(",")
+        ):
+            cache_allowed = False
+        if cache_allowed:
+            from .cache import exact_cache_key
+
+            cache_key = exact_cache_key(
+                payload, config.cache.namespace, cache_routing_signature
+            )
+            try:
+                cached = await cache_store.get(context.tenant_id, cache_key)
+            except Exception as exc:
+                if config.cache.failure_mode == "closed":
+                    if owner_token and idempotency_digest:
+                        await idempotency_store.release(
+                            context.tenant_id, idempotency_digest, owner_token
+                        )
+                    raise
+                cached = None
+                cache_allowed = False
+                logger.error(
+                    "Exact cache lookup failed; bypassing cache error_type=%s",
+                    type(exc).__name__,
+                )
+            if cached is not None:
+                headers = {
+                    "X-Cache": "HIT",
+                    "Age": str(max(0, int(time.time() - cached.created_at))),
+                }
+                if owner_token and idempotency_digest:
+                    encoded_cached = json.dumps(
+                        cached.response, ensure_ascii=False, separators=(",", ":")
+                    )
+                    stored = await idempotency_store.complete(
+                        context.tenant_id, idempotency_digest, owner_token, encoded_cached
+                    )
+                    headers.update({
+                        "Idempotent-Replayed": "false",
+                        "Idempotency-Stored": str(stored).lower(),
+                    })
+                return JSONResponse(content=cached.response, headers=headers)
         try:
             body, provider, upstream_model = await router.complete_for(
                 payload, context.tenant_id, tenant_limits
@@ -474,8 +580,38 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             raise
         meta = body.pop("_gateway_meta", {})
         result = {**body, "gateway": {"provider": provider, "upstream_model": upstream_model, **meta}}
+        encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+        response_headers = {}
+        if cache_store is not None:
+            if cache_allowed and cache_key and len(encoded.encode("utf-8")) <= config.cache.max_response_bytes:
+                cache_result = {
+                    **result,
+                    "gateway": {**result["gateway"], "rate_limits": {}},
+                }
+                try:
+                    await cache_store.put(
+                        context.tenant_id, cache_key,
+                        json.dumps(cache_result, ensure_ascii=False, separators=(",", ":")),
+                    )
+                    response_headers["X-Cache"] = "MISS"
+                except Exception as exc:
+                    if config.cache.failure_mode == "closed":
+                        if owner_token and idempotency_digest:
+                            await idempotency_store.release(
+                                context.tenant_id, idempotency_digest, owner_token
+                            )
+                        raise
+                    logger.error(
+                        "Exact cache write failed; returning uncached response error_type=%s",
+                        type(exc).__name__,
+                    )
+                    response_headers["X-Cache"] = "BYPASS"
+                    response_headers["X-Cache-Reason"] = "backend-error"
+            else:
+                response_headers["X-Cache"] = "BYPASS"
+                if cache_allowed:
+                    response_headers["X-Cache-Reason"] = "response-too-large"
         if owner_token and idempotency_digest:
-            encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
             if len(encoded.encode("utf-8")) <= config.idempotency.max_response_bytes:
                 stored = await idempotency_store.complete(
                     context.tenant_id, idempotency_digest, owner_token, encoded
@@ -483,10 +619,11 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             else:
                 await idempotency_store.release(context.tenant_id, idempotency_digest, owner_token)
                 stored = False
-            return JSONResponse(
-                content=result,
-                headers={"Idempotent-Replayed": "false", "Idempotency-Stored": str(stored).lower()},
-            )
+            response_headers.update({
+                "Idempotent-Replayed": "false", "Idempotency-Stored": str(stored).lower()
+            })
+        if response_headers:
+            return JSONResponse(content=result, headers=response_headers)
         return result
 
     disabled_paths: set[str] = set()

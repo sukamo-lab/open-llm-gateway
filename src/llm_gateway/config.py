@@ -102,6 +102,7 @@ class GatewayConfig(StrictModel):
     observability: "ObservabilityConfig" = Field(default_factory=lambda: ObservabilityConfig())
     accounting: "AccountingConfig" = Field(default_factory=lambda: AccountingConfig())
     idempotency: "IdempotencyConfig" = Field(default_factory=lambda: IdempotencyConfig())
+    cache: "CacheConfig" = Field(default_factory=lambda: CacheConfig())
     features: "FeatureConfig" = Field(default_factory=lambda: FeatureConfig())
     providers: list[ProviderConfig]
 
@@ -119,6 +120,7 @@ class GatewayConfig(StrictModel):
                 "usage_accounting": False, "cost_tracking": False,
                 "metrics": False, "circuit_breaker": True, "structured_logging": False,
                 "idempotency": False,
+                "exact_cache": False,
             },
             "multi": {
                 "authentication": True, "admin_api": True, "managed_keys": True,
@@ -126,6 +128,7 @@ class GatewayConfig(StrictModel):
                 "usage_accounting": True, "cost_tracking": True,
                 "metrics": True, "circuit_breaker": True, "structured_logging": True,
                 "idempotency": True,
+                "exact_cache": False,
             },
         }[self.mode]
         for name, default in defaults.items():
@@ -139,6 +142,8 @@ class GatewayConfig(StrictModel):
             raise ValueError("tenant_quotas requires managed_keys")
         if self.features.cost_tracking and not self.features.usage_accounting:
             raise ValueError("cost_tracking requires usage_accounting")
+        if self.features.exact_cache and self.cache.backend == "redis" and not self.cache.redis_url():
+            raise ValueError(f"exact_cache Redis backend requires {self.cache.redis_url_env}")
         return self
 
     def diagnostics(self) -> list[tuple[str, str]]:
@@ -168,6 +173,8 @@ class GatewayConfig(StrictModel):
             issues.append(("WARN", "CORS allows every origin"))
         if self.mode == "multi" and self.observability.include_upstream_errors:
             issues.append(("WARN", "upstream error details may be returned to clients"))
+        if self.mode == "multi" and self.features.exact_cache and self.cache.backend == "memory":
+            issues.append(("WARN", "in-memory exact cache is not shared across replicas"))
         for provider in self.providers:
             if self.mode == "multi" and provider.enabled and provider.api_key_value and provider.api_key():
                 issues.append(("WARN", f"{provider.name} stores its API key directly in YAML"))
@@ -262,6 +269,21 @@ class IdempotencyConfig(StrictModel):
         return self
 
 
+class CacheConfig(StrictModel):
+    backend: Literal["memory", "database", "redis"] = "memory"
+    ttl_seconds: int = Field(default=3600, ge=1, le=604800)
+    max_entries: int = Field(default=10_000, ge=1, le=10_000_000)
+    max_response_bytes: int = Field(default=10_485_760, ge=1024, le=67_108_864)
+    namespace: str = Field(default="v1", min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._-]+$")
+    allow_client_bypass: bool = True
+    failure_mode: Literal["open", "closed"] = "open"
+    redis_url_env: str = "LLM_GATEWAY_REDIS_URL"
+    redis_prefix: str = Field(default="llm-gateway:exact", min_length=1, max_length=128)
+
+    def redis_url(self) -> str | None:
+        return os.getenv(self.redis_url_env) or None
+
+
 class FeatureConfig(StrictModel):
     authentication: bool | None = None
     admin_api: bool | None = None
@@ -274,6 +296,7 @@ class FeatureConfig(StrictModel):
     circuit_breaker: bool | None = None
     structured_logging: bool | None = None
     idempotency: bool | None = None
+    exact_cache: bool | None = None
 
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
