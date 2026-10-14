@@ -19,6 +19,7 @@ features:
   tracing: false
   pii_detection: false
   moderation: false
+  prompt_injection: false
 
 server:
   host: 0.0.0.0
@@ -117,6 +118,15 @@ moderation:
   max_scan_characters: 1000000
   failure_mode: closed
   streaming_output: block
+
+prompt_injection:
+  # Heuristic risk signal only; begin with score or warn and calibrate locally.
+  action: warn
+  threshold: 0.5
+  signals: [instruction_override, secret_exfiltration, role_override, tool_manipulation, encoding_evasion]
+  scan_roles: [user, tool]
+  max_scan_characters: 1000000
+  failure_mode: closed
 
 providers:
   - name: google-free

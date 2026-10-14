@@ -55,6 +55,29 @@ def test_free_models_precede_paid_and_reasoning_is_required(tmp_path, monkeypatc
     assert [item.model.upstream_model for item in router.candidates("auto", True)] == ["paid-reason"]
 
 
+def test_prompt_injection_route_only_selects_marked_safe_models(tmp_path, monkeypatch):
+    monkeypatch.setenv("FREE_KEY", "secret")
+    monkeypatch.setenv("PAID_KEY", "secret")
+    config = make_config(tmp_path, [
+        provider("free", "free", "FREE_KEY", [
+            {"name": "chat", "upstream_model": "free-chat", "priority": 1},
+        ]),
+        provider("paid", "paid", "PAID_KEY", [
+            {
+                "name": "safe", "upstream_model": "safe-chat", "priority": 1,
+                "prompt_injection_safe": True,
+            },
+        ]),
+    ])
+    router = GatewayRouter(config, QuotaStore(config.database), httpx.AsyncClient())
+    assert [item.model.name for item in router.candidates("auto", False)] == ["chat", "safe"]
+    assert [
+        item.model.name for item in router.candidates(
+            "auto", False, require_injection_safe=True
+        )
+    ] == ["safe"]
+
+
 @pytest.mark.asyncio
 async def test_retryable_response_fails_over(tmp_path, monkeypatch):
     monkeypatch.setenv("FREE_KEY", "secret")

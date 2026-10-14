@@ -22,6 +22,7 @@ features:
   tracing: false
   pii_detection: false
   moderation: false
+  prompt_injection: false
 ```
 
 Single-user defaults require only a provider key, bind to localhost, do not initialize tenant/key infrastructure, and select the no-database `NullQuotaStore` hot path. Provider quotas or accounting can be enabled independently when desired.
@@ -52,6 +53,7 @@ features:
   tracing: false
   pii_detection: false
   moderation: false
+  prompt_injection: false
 ```
 
 Multi-user defaults enable tenant identities, expiring consumer keys, tenant/provider limits, accounting, costs, metrics, and circuit breaking. PostgreSQL is recommended for multiple replicas.
@@ -77,6 +79,7 @@ Disabled features are not merely hidden:
 - `tracing: false` avoids OpenTelemetry SDK/exporter imports, span creation, context propagation, and background exporter threads. Tracing is opt-in in both modes.
 - `pii_detection: false` avoids importing or constructing detectors and performs no prompt traversal. It is opt-in in both modes.
 - `moderation: false` avoids importing or constructing policy engines and performs no content traversal. It is opt-in in both modes.
+- `prompt_injection: false` avoids importing or constructing risk engines and performs no message traversal. It is opt-in in both modes.
 - `authentication: false` removes consumer authentication checks, but is accepted only on a localhost bind.
 
 Invalid dependency combinations fail configuration validation: managed keys require authentication and the admin API; tenant quotas require managed keys; cost tracking requires accounting.

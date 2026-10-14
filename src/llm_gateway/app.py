@@ -189,6 +189,15 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                 }
                 if config.features.moderation else None
             ),
+            "prompt_injection_policy": (
+                {
+                    "action": config.prompt_injection.action,
+                    "threshold": config.prompt_injection.threshold,
+                    "signals": sorted(config.prompt_injection.signals),
+                    "scan_roles": sorted(config.prompt_injection.scan_roles),
+                }
+                if config.features.prompt_injection else None
+            ),
             "providers": [
                 {
                     "name": provider.name, "enabled": provider.enabled, "tier": provider.tier,
@@ -198,6 +207,7 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                         {
                             "name": model.name, "upstream": model.upstream_model,
                             "priority": model.priority, "capabilities": sorted(model.capabilities),
+                            "prompt_injection_safe": model.prompt_injection_safe,
                             "overrides": model.request_overrides,
                         }
                         for model in provider.models
@@ -233,6 +243,11 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         from .moderation import ModerationProcessor
 
         moderation_processor = ModerationProcessor(config.moderation)
+    injection_processor = None
+    if config.features.prompt_injection:
+        from .prompt_injection import PromptInjectionProcessor
+
+        injection_processor = PromptInjectionProcessor(config.prompt_injection)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -526,6 +541,42 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             raise HTTPException(400, "request body must contain valid JSON") from exc
         if not isinstance(payload, dict):
             raise HTTPException(400, "request body must be a JSON object")
+        injection_metadata: dict[str, object] = {}
+        require_injection_safe = False
+        injection_report = None
+        if injection_processor is not None:
+            from .prompt_injection import PromptInjectionBlocked, PromptInjectionError
+
+            try:
+                injection_report = injection_processor.process(payload)
+                require_injection_safe = injection_report.route_required
+                await metrics.prompt_injection(
+                    injection_report.action,
+                    "risky" if injection_report.risky else "clean",
+                )
+                injection_metadata = injection_report.metadata()
+                if injection_report.risky:
+                    log = logger.warning if injection_report.action == "warn" else logger.info
+                    log(
+                        "Prompt-injection risk action=%s score=%.4f signals=%s",
+                        injection_report.action, injection_report.score,
+                        ",".join(injection_report.signals),
+                    )
+            except PromptInjectionBlocked as exc:
+                await metrics.prompt_injection("block", "blocked")
+                logger.warning(
+                    "Prompt-injection policy blocked request score=%.4f signals=%s",
+                    exc.report.score, ",".join(exc.report.signals),
+                )
+                raise HTTPException(400, "request blocked by prompt-injection policy") from exc
+            except PromptInjectionError as exc:
+                await metrics.prompt_injection(config.prompt_injection.action, "error")
+                logger.error("Prompt-injection evaluation failed error_type=%s", type(exc).__name__)
+                if config.prompt_injection.failure_mode == "closed":
+                    raise HTTPException(
+                        422, "request could not be evaluated by prompt-injection policy"
+                    ) from exc
+                injection_metadata = {"action": "bypass", "reason": "evaluation_error"}
         moderation_metadata: dict[str, object] = {}
         if moderation_processor is not None and config.moderation.scan in {"input", "both"}:
             from .moderation import ModerationBlocked, ModerationError
@@ -612,7 +663,9 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                 raise HTTPException(400, "streaming is disabled when PII output scanning is required")
             if idempotency_key:
                 raise HTTPException(400, "Idempotency-Key is not supported for streaming requests")
-            iterator = router.stream(payload, context.tenant_id, tenant_limits)
+            iterator = router.stream(
+                payload, context.tenant_id, tenant_limits, require_injection_safe
+            )
             try:
                 first = await anext(iterator)
             except QuotaExceeded as exc:
@@ -629,6 +682,10 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                     yield chunk
 
             response = StreamingResponse(replay(), media_type="text/event-stream")
+            if injection_report is not None:
+                response.headers["X-Prompt-Injection-Score"] = f"{injection_report.score:.4f}"
+                if injection_report.risky and injection_report.action == "warn":
+                    response.headers["X-Prompt-Injection-Risk"] = "warning"
             if moderation_processor is not None and config.moderation.scan in {"output", "both"}:
                 response.headers["X-Moderation-Output"] = "BYPASS"
             if pii_processor is not None and config.pii.scan in {"output", "both"}:
@@ -717,7 +774,7 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                 return JSONResponse(content=cached.response, headers=headers)
         try:
             body, provider, upstream_model = await router.complete_for(
-                payload, context.tenant_id, tenant_limits
+                payload, context.tenant_id, tenant_limits, require_injection_safe
             )
         except QuotaExceeded as exc:
             if owner_token and idempotency_digest:
@@ -815,6 +872,7 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                 "provider": provider, "upstream_model": upstream_model, **meta,
                 **({"pii": pii_metadata} if pii_metadata else {}),
                 **({"moderation": moderation_metadata} if moderation_metadata else {}),
+                **({"prompt_injection": injection_metadata} if injection_metadata else {}),
             },
         }
         encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":"))

@@ -37,6 +37,8 @@ For PII policy operation, monitor `llm_gateway_pii_events_total` by stage, actio
 
 For moderation, monitor `llm_gateway_moderation_events_total` by stage, action, and outcome. Treat error or bypass outcomes as policy-control degradation. Begin with `action: monitor`, measure category-level false positives and missed cases using an approved corpus, and only then move selected deployments to blocking. The built-in rules are a deterministic baseline, not a substitute for a separately evaluated moderation service or model where the risk profile requires one.
 
+For prompt-injection policy, monitor `llm_gateway_prompt_injection_events_total` by action and outcome. Begin with scoring, compare flagged and clean traffic against an approved adversarial corpus, and calibrate the threshold before warning, blocking, or routing. Treat fail-open errors as control degradation. Review every `prompt_injection_safe` model designation together with tool permissions, data access, sandboxing, and provider retention policy; the designation does not make a model inherently injection-proof.
+
 ## Production checklist
 
 1. Copy `config.example.yaml` and `.env.example`; keep both real files out of source control.

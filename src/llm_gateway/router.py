@@ -105,11 +105,15 @@ class GatewayRouter:
             "failures": self._failures.get(provider.name, 0),
             "retry_after_seconds": max(0, round(self._open_until.get(provider.name, 0) - now)),
             "models": [model.name for model in provider.models],
+            "prompt_injection_safe_models": [
+                model.name for model in provider.models if model.prompt_injection_safe
+            ],
         } for provider in self.config.providers]
 
     def candidates(
         self, requested_model: str, reasoning: bool, requested_provider: str | None = None,
         required_capabilities: set[str] | None = None,
+        require_injection_safe: bool = False,
     ) -> list[Candidate]:
         result: list[Candidate] = []
         for provider in self.config.providers:
@@ -125,6 +129,8 @@ class GatewayRouter:
                 if reasoning and not model.reasoning:
                     continue
                 if required_capabilities and not required_capabilities.issubset(model.capabilities):
+                    continue
+                if require_injection_safe and not model.prompt_injection_safe:
                     continue
                 result.append(Candidate(provider, model))
         return sorted(
@@ -183,6 +189,7 @@ class GatewayRouter:
     async def complete_for(
         self, payload: dict[str, Any], consumer_id: str | None = None,
         consumer_limits: tuple[Any, ...] = (),
+        require_injection_safe: bool = False,
     ) -> tuple[dict[str, Any], str, str]:
         requested_model = str(payload.get("model", "auto"))
         requested_provider = payload.get("provider")
@@ -191,6 +198,7 @@ class GatewayRouter:
         candidates = self.candidates(
             requested_model, self.wants_reasoning(payload), requested_provider,
             self.required_capabilities(payload),
+            require_injection_safe,
         )
         if requested_provider and not self.config.routing.allow_provider_override:
             raise NoModelAvailable("provider override is disabled")
@@ -297,6 +305,7 @@ class GatewayRouter:
     async def stream(
         self, payload: dict[str, Any], consumer_id: str | None = None,
         consumer_limits: tuple[Any, ...] = (),
+        require_injection_safe: bool = False,
     ) -> AsyncIterator[bytes]:
         requested_model = str(payload.get("model", "auto"))
         requested_provider = payload.get("provider")
@@ -306,6 +315,7 @@ class GatewayRouter:
         candidates = self.candidates(
             requested_model, self.wants_reasoning(payload), requested_provider,
             self.required_capabilities(payload),
+            require_injection_safe,
         )
         max_attempts = self.config.routing.max_attempts or len(candidates)
         quota_skips = 0

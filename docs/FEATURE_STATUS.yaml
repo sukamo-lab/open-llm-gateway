@@ -171,7 +171,19 @@ features:
       - tests/test_app.py
       - docs/CONFIGURATION.md
     notes: An opt-in engine protocol, deterministic local baseline, organization-specific literal terms, input/output monitor-or-block actions, fail-open/fail-closed behavior, explicit streaming policy, cache invalidation, and content-free metadata/logs/metrics are implemented; full CI, governed corpus calibration, latency benchmarks, and versioned third-party engine loading remain pending.
-  - {id: GOV-INJECT-001, pillar: governance, name: Prompt-injection risk policy, status: planned, target: v0.7}
+  - id: GOV-INJECT-001
+    pillar: governance
+    name: Prompt-injection risk policy
+    status: partial
+    target: v0.7
+    evidence:
+      - src/llm_gateway/prompt_injection.py
+      - src/llm_gateway/app.py
+      - src/llm_gateway/router.py
+      - tests/test_prompt_injection.py
+      - tests/test_router.py
+      - docs/CONFIGURATION.md
+    notes: An opt-in engine protocol, bounded heuristic scorer, role selection, score/warn/block/safe-model-route actions, fail-open/fail-closed behavior, cache invalidation, diagnostics, and content-free metadata/logs/metrics are implemented; full CI, governed adversarial-corpus calibration, latency benchmarks, and versioned third-party engine loading remain pending. Model safety markers are operator policy assertions, not injection-resistance guarantees.
   - {id: GOV-RESIDENCY-001, pillar: governance, name: Data residency enforcement, status: planned, target: v0.9, depends_on: [ROUTE-POLICY-001]}
   - {id: SEC-ENC-001, pillar: governance, name: Envelope encryption for persisted sensitive fields, status: planned, target: v0.9}
   - {id: SEC-CREDROT-001, pillar: governance, name: Zero-downtime provider credential rotation, status: planned, target: v0.9}
