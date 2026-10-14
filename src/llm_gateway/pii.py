@@ -164,10 +164,13 @@ class PIIProcessor:
         return result, report
 
     def _matches(self, text: str) -> list[PIIMatch]:
-        candidates = sorted(
-            (match for detector in self.detectors for match in detector.find(text)),
-            key=lambda match: (match.start, -(match.end - match.start)),
-        )
+        try:
+            candidates = sorted(
+                (match for detector in self.detectors for match in detector.find(text)),
+                key=lambda match: (match.start, -(match.end - match.start)),
+            )
+        except Exception as exc:
+            raise PIIScanError("PII detector evaluation failed") from exc
         accepted: list[PIIMatch] = []
         for match in candidates:
             if not accepted or match.start >= accepted[-1].end:

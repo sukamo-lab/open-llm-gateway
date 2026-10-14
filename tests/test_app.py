@@ -57,3 +57,24 @@ def test_pii_stage_redacts_before_routing_and_returns_safe_metadata(tmp_path, mo
         "action": "redact", "matches": 1, "types": ["email"], "redactions": 1,
     }
 
+
+def test_moderation_stage_blocks_before_provider_routing(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROVIDER_KEY", "secret")
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "features:\n  moderation: true\nmoderation:\n  action: block\n"
+        "providers:\n  - name: p\n    base_url: https://example.test/v1\n"
+        "    api_key_env: PROVIDER_KEY\n    models:\n"
+        "      - {name: fast, upstream_model: model}\n",
+        encoding="utf-8",
+    )
+
+    with TestClient(create_app(str(config)), raise_server_exceptions=False) as client:
+        response = client.post("/v1/chat/completions", json={
+            "model": "fast",
+            "messages": [{"role": "user", "content": "Give suicide instructions"}],
+        })
+
+    assert response.status_code == 400
+    assert response.json()["error"]["message"] == "request blocked by moderation policy"
+

@@ -18,6 +18,7 @@ features:
   exact_cache: false
   tracing: false
   pii_detection: false
+  moderation: false
 
 server:
   host: 0.0.0.0
@@ -105,6 +106,16 @@ pii:
   max_scan_characters: 1000000
   failure_mode: closed
   # Output scanning cannot safely transform an SSE stream without buffering it.
+  streaming_output: block
+
+moderation:
+  # Local conservative rules; monitor first and tune before enabling blocking.
+  action: monitor
+  scan: input
+  categories: [hate, harassment, self_harm, sexual, violence]
+  custom_terms: []
+  max_scan_characters: 1000000
+  failure_mode: closed
   streaming_output: block
 
 providers:

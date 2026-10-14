@@ -73,6 +73,7 @@ features:
   exact_cache: false
   tracing: false
   pii_detection: false
+  moderation: false
 server:
   host: 127.0.0.1
   port: 8000

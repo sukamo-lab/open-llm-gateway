@@ -106,6 +106,7 @@ class GatewayConfig(StrictModel):
     cache: "CacheConfig" = Field(default_factory=lambda: CacheConfig())
     telemetry: "TelemetryConfig" = Field(default_factory=lambda: TelemetryConfig())
     pii: "PIIConfig" = Field(default_factory=lambda: PIIConfig())
+    moderation: "ModerationConfig" = Field(default_factory=lambda: ModerationConfig())
     features: "FeatureConfig" = Field(default_factory=lambda: FeatureConfig())
     providers: list[ProviderConfig]
 
@@ -126,6 +127,7 @@ class GatewayConfig(StrictModel):
                 "exact_cache": False,
                 "tracing": False,
                 "pii_detection": False,
+                "moderation": False,
             },
             "multi": {
                 "authentication": True, "admin_api": True, "managed_keys": True,
@@ -136,6 +138,7 @@ class GatewayConfig(StrictModel):
                 "exact_cache": False,
                 "tracing": False,
                 "pii_detection": False,
+                "moderation": False,
             },
         }[self.mode]
         for name, default in defaults.items():
@@ -190,6 +193,14 @@ class GatewayConfig(StrictModel):
             and self.pii.streaming_output == "bypass"
         ):
             issues.append(("WARN", "streaming responses bypass configured PII output scanning"))
+        if self.features.moderation and self.moderation.failure_mode == "open":
+            issues.append(("WARN", "moderation engine failures are configured to bypass policy"))
+        if (
+            self.features.moderation
+            and self.moderation.scan in {"output", "both"}
+            and self.moderation.streaming_output == "bypass"
+        ):
+            issues.append(("WARN", "streaming responses bypass configured output moderation"))
         endpoint = self.telemetry.endpoint()
         if self.features.tracing and endpoint and endpoint.startswith("http://"):
             issues.append(("WARN", "OpenTelemetry exporter endpoint is not encrypted"))
@@ -365,6 +376,34 @@ class PIIConfig(StrictModel):
         return self
 
 
+class ModerationConfig(StrictModel):
+    action: Literal["monitor", "block"] = "block"
+    scan: Literal["input", "output", "both"] = "input"
+    categories: set[Literal["hate", "harassment", "self_harm", "sexual", "violence", "custom"]] = Field(
+        default_factory=lambda: {"hate", "harassment", "self_harm", "sexual", "violence"}
+    )
+    custom_terms: list[str] = Field(default_factory=list, max_length=1_000)
+    max_scan_characters: int = Field(default=1_000_000, ge=1_024, le=10_000_000)
+    failure_mode: Literal["open", "closed"] = "closed"
+    streaming_output: Literal["block", "bypass"] = "block"
+
+    @model_validator(mode="after")
+    def valid_policy(self) -> "ModerationConfig":
+        normalized = [term.strip().casefold() for term in self.custom_terms]
+        if any(not term or len(term) > 200 for term in normalized):
+            raise ValueError("moderation custom terms must contain 1 to 200 characters")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("moderation custom terms must be unique ignoring case")
+        if "custom" in self.categories and not normalized:
+            raise ValueError("moderation custom category requires custom_terms")
+        if "custom" not in self.categories and normalized:
+            raise ValueError("moderation custom_terms require the custom category")
+        if not self.categories:
+            raise ValueError("moderation categories must not be empty")
+        self.custom_terms = normalized
+        return self
+
+
 class FeatureConfig(StrictModel):
     authentication: bool | None = None
     admin_api: bool | None = None
@@ -380,6 +419,7 @@ class FeatureConfig(StrictModel):
     exact_cache: bool | None = None
     tracing: bool | None = None
     pii_detection: bool | None = None
+    moderation: bool | None = None
 
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
