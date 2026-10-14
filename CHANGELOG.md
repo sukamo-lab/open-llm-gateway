@@ -16,6 +16,7 @@ All notable product changes are recorded here. The project follows [Semantic Ver
 - OpenTelemetry tracing with W3C propagation, OTLP export, and log correlation.
 - Provider/model SLA metrics, configurable latency histograms, Prometheus alerts, and a Grafana dashboard.
 - Opt-in pluggable PII detection, redaction, blocking, bounded audit metrics, and explicit streaming policy.
+- Opt-in provider-neutral moderation policies with local baseline rules, custom terms, and safe audit metrics.
 
 ## [0.5.0] - 2026-10-13
 

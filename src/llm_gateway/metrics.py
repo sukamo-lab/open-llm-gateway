@@ -63,6 +63,7 @@ class Metrics:
         self.cache_requests: Counter[tuple[str, str]] = Counter()
         self.retries: Counter[tuple[str, str, str]] = Counter()
         self.pii_events: Counter[tuple[str, str, str]] = Counter()
+        self.moderation_events: Counter[tuple[str, str, str]] = Counter()
         self.circuits: dict[str, int] = {}
         self.latency_ms: Counter[str] = Counter()
         self.http_duration = Histogram(http_buckets)
@@ -104,6 +105,10 @@ class Metrics:
     async def pii(self, stage: str, action: str, outcome: str) -> None:
         async with self._lock:
             self.pii_events[(stage, action, outcome)] += 1
+
+    async def moderation(self, stage: str, action: str, outcome: str) -> None:
+        async with self._lock:
+            self.moderation_events[(stage, action, outcome)] += 1
 
     async def render(self) -> str:
         async with self._lock:
@@ -157,6 +162,14 @@ class Metrics:
             lines.extend(
                 f'llm_gateway_cache_requests_total{_labels(("backend", "outcome"), key)} {count}'
                 for key, count in sorted(self.cache_requests.items())
+            )
+            lines += [
+                "# HELP llm_gateway_moderation_events_total Moderation evaluations without content or identity labels.",
+                "# TYPE llm_gateway_moderation_events_total counter",
+            ]
+            lines.extend(
+                f'llm_gateway_moderation_events_total{_labels(("stage", "action", "outcome"), key)} {count}'
+                for key, count in sorted(self.moderation_events.items())
             )
             lines += [
                 "# HELP llm_gateway_pii_events_total PII policy evaluations without content or identity labels.",
@@ -222,6 +235,9 @@ class NullMetrics:
         return None
 
     async def pii(self, stage: str, action: str, outcome: str) -> None:
+        return None
+
+    async def moderation(self, stage: str, action: str, outcome: str) -> None:
         return None
 
     async def render(self) -> str:

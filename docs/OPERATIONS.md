@@ -35,6 +35,8 @@ For SLA monitoring, import `deploy/grafana/llm-gateway-dashboard.json` and load 
 
 For PII policy operation, monitor `llm_gateway_pii_events_total` by stage, action, and outcome. Investigate scanner errors immediately in fail-open deployments because requests may have continued without evaluation. Logs contain detector types and counts but not matched values. Before enabling blocking or redaction, run representative and adversarial test data through a non-production environment and document acceptable false-positive behavior. Output scanning with SSE must either block streaming or explicitly report a bypass.
 
+For moderation, monitor `llm_gateway_moderation_events_total` by stage, action, and outcome. Treat error or bypass outcomes as policy-control degradation. Begin with `action: monitor`, measure category-level false positives and missed cases using an approved corpus, and only then move selected deployments to blocking. The built-in rules are a deterministic baseline, not a substitute for a separately evaluated moderation service or model where the risk profile requires one.
+
 ## Production checklist
 
 1. Copy `config.example.yaml` and `.env.example`; keep both real files out of source control.

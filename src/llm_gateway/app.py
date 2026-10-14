@@ -179,6 +179,16 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                 }
                 if config.features.pii_detection else None
             ),
+            "moderation_policy": (
+                {
+                    "action": config.moderation.action,
+                    "scan": config.moderation.scan,
+                    "categories": sorted(config.moderation.categories),
+                    "custom_terms": config.moderation.custom_terms,
+                    "streaming_output": config.moderation.streaming_output,
+                }
+                if config.features.moderation else None
+            ),
             "providers": [
                 {
                     "name": provider.name, "enabled": provider.enabled, "tier": provider.tier,
@@ -218,6 +228,11 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         from .pii import PIIProcessor
 
         pii_processor = PIIProcessor(config.pii)
+    moderation_processor = None
+    if config.features.moderation:
+        from .moderation import ModerationProcessor
+
+        moderation_processor = ModerationProcessor(config.moderation)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -511,6 +526,36 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             raise HTTPException(400, "request body must contain valid JSON") from exc
         if not isinstance(payload, dict):
             raise HTTPException(400, "request body must be a JSON object")
+        moderation_metadata: dict[str, object] = {}
+        if moderation_processor is not None and config.moderation.scan in {"input", "both"}:
+            from .moderation import ModerationBlocked, ModerationError
+
+            try:
+                moderation_report = moderation_processor.process_request(payload)
+                await metrics.moderation(
+                    "input", moderation_report.action,
+                    "flagged" if moderation_report.flagged else "clean",
+                )
+                moderation_metadata["input"] = moderation_report.metadata()
+                if moderation_report.flagged:
+                    logger.info(
+                        "Moderation policy flagged request action=%s findings=%s categories=%s",
+                        moderation_report.action, moderation_report.findings,
+                        ",".join(moderation_report.categories),
+                    )
+            except ModerationBlocked as exc:
+                await metrics.moderation("input", "block", "blocked")
+                logger.warning(
+                    "Moderation policy blocked request findings=%s categories=%s",
+                    exc.report.findings, ",".join(exc.report.categories),
+                )
+                raise HTTPException(400, "request blocked by moderation policy") from exc
+            except ModerationError as exc:
+                await metrics.moderation("input", config.moderation.action, "error")
+                logger.error("Moderation request evaluation failed error_type=%s", type(exc).__name__)
+                if config.moderation.failure_mode == "closed":
+                    raise HTTPException(422, "request could not be evaluated by moderation policy") from exc
+                moderation_metadata["input"] = {"action": "bypass", "reason": "evaluation_error"}
         pii_metadata: dict[str, object] = {}
         if pii_processor is not None and config.pii.scan in {"input", "both"}:
             from .pii import PIIBlocked, PIIScanError
@@ -554,6 +599,12 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         tenant_limits = context.limits if config.features.tenant_quotas else ()
         if payload.get("stream"):
             if (
+                moderation_processor is not None
+                and config.moderation.scan in {"output", "both"}
+                and config.moderation.streaming_output == "block"
+            ):
+                raise HTTPException(400, "streaming is disabled when output moderation is required")
+            if (
                 pii_processor is not None
                 and config.pii.scan in {"output", "both"}
                 and config.pii.streaming_output == "block"
@@ -578,6 +629,8 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                     yield chunk
 
             response = StreamingResponse(replay(), media_type="text/event-stream")
+            if moderation_processor is not None and config.moderation.scan in {"output", "both"}:
+                response.headers["X-Moderation-Output"] = "BYPASS"
             if pii_processor is not None and config.pii.scan in {"output", "both"}:
                 response.headers["X-PII-Output"] = "BYPASS"
             if cache_store is not None:
@@ -679,6 +732,47 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                 await idempotency_store.release(context.tenant_id, idempotency_digest, owner_token)
             raise
         meta = body.pop("_gateway_meta", {})
+        if moderation_processor is not None and config.moderation.scan in {"output", "both"}:
+            from .moderation import ModerationBlocked, ModerationError
+
+            try:
+                moderation_report = moderation_processor.process_response(body)
+                await metrics.moderation(
+                    "output", moderation_report.action,
+                    "flagged" if moderation_report.flagged else "clean",
+                )
+                moderation_metadata["output"] = moderation_report.metadata()
+                if moderation_report.flagged:
+                    logger.info(
+                        "Moderation policy flagged response action=%s findings=%s categories=%s",
+                        moderation_report.action, moderation_report.findings,
+                        ",".join(moderation_report.categories),
+                    )
+            except ModerationBlocked as exc:
+                await metrics.moderation("output", "block", "blocked")
+                if owner_token and idempotency_digest:
+                    await idempotency_store.release(
+                        context.tenant_id, idempotency_digest, owner_token
+                    )
+                logger.warning(
+                    "Moderation policy blocked response findings=%s categories=%s",
+                    exc.report.findings, ",".join(exc.report.categories),
+                )
+                raise HTTPException(502, "upstream response blocked by moderation policy") from exc
+            except ModerationError as exc:
+                await metrics.moderation("output", config.moderation.action, "error")
+                logger.error("Moderation response evaluation failed error_type=%s", type(exc).__name__)
+                if config.moderation.failure_mode == "closed":
+                    if owner_token and idempotency_digest:
+                        await idempotency_store.release(
+                            context.tenant_id, idempotency_digest, owner_token
+                        )
+                    raise HTTPException(
+                        502, "upstream response could not be evaluated by moderation policy"
+                    ) from exc
+                moderation_metadata["output"] = {
+                    "action": "bypass", "reason": "evaluation_error"
+                }
         if pii_processor is not None and config.pii.scan in {"output", "both"}:
             from .pii import PIIBlocked, PIIScanError
 
@@ -720,6 +814,7 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             "gateway": {
                 "provider": provider, "upstream_model": upstream_model, **meta,
                 **({"pii": pii_metadata} if pii_metadata else {}),
+                **({"moderation": moderation_metadata} if moderation_metadata else {}),
             },
         }
         encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":"))

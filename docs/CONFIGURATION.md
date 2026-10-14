@@ -110,6 +110,19 @@ The dashboard and alert-rule examples are in `deploy/grafana` and `deploy/promet
 
 Successful non-streaming responses include `gateway.pii` metadata containing only action, count, detector types, and redaction count. Logs and `llm_gateway_pii_events_total` similarly contain no matched values, prompts, tenant identifiers, or request identifiers. Pattern matching can produce false positives and false negatives; tune the enabled detectors and test against representative data. This feature is a data-minimization control, not a compliance certification.
 
+## Moderation policies
+
+`features.moderation` inserts a local moderation stage before PII transformation, idempotency, caching, quota reservation, and provider routing. It is disabled by default in both modes and its module is not imported when disabled. The `ModerationEngine` protocol in `src/llm_gateway/moderation.py` permits provider-neutral in-process engines; versioned third-party loading is deferred to the extension SDK.
+
+The built-in engine is a small deterministic baseline for deployment wiring and organization-specific literal terms. It recognizes conservative phrases in `hate`, `harassment`, `self_harm`, `sexual`, and `violence` categories. Add case-insensitive literal `custom_terms` only when the `custom` category is enabled. It is not a statistical safety model and is not represented as comprehensive moderation.
+
+- `action: monitor` permits content and returns content-free findings metadata; `block` rejects flagged input or suppresses flagged output.
+- `scan` chooses `input`, `output`, or `both`; successful non-streaming responses expose only action, flag, count, and category names under `gateway.moderation`.
+- `max_scan_characters` bounds evaluation. `failure_mode: closed` rejects unevaluated content; `open` permits it with bypass metadata and an error metric.
+- `streaming_output: block` rejects SSE requests when output moderation is required. `bypass` explicitly permits an unmoderated stream and returns `X-Moderation-Output: BYPASS`.
+
+Moderation policy configuration participates in exact-cache invalidation, and output decisions occur before cache writes. Logs and `llm_gateway_moderation_events_total` contain no prompts, responses, matched terms, tenant IDs, or request IDs. Start in monitor mode, evaluate false positives and false negatives against a governed corpus, then enable blocking only with an escalation and appeal process appropriate to the application.
+
 When `allow_client_bypass` is true, `Cache-Control: no-cache` or `no-store` bypasses both lookup and storage. Disable the feature for sensitive workloads that prohibit response retention. Cached copies omit upstream rate-limit metadata because it becomes stale immediately.
 
 Price fields are metadata expressed in USD per million tokens. Keep prices current when vendors change them.

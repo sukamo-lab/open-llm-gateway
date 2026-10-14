@@ -158,7 +158,19 @@ features:
       - tests/test_config.py
       - docs/CONFIGURATION.md
     notes: An opt-in detector protocol, bounded local built-ins, input/output detect-redact-block actions, fail-open/fail-closed behavior, explicit streaming policy, content-free response metadata/logs/metrics, and adversarial unit coverage are implemented; full CI, production corpus calibration, latency benchmarks, and versioned third-party plugin loading remain pending.
-  - {id: GOV-MOD-001, pillar: governance, name: Pluggable input/output moderation, status: planned, target: v0.7}
+  - id: GOV-MOD-001
+    pillar: governance
+    name: Pluggable input/output moderation
+    status: partial
+    target: v0.7
+    evidence:
+      - src/llm_gateway/moderation.py
+      - src/llm_gateway/app.py
+      - src/llm_gateway/config.py
+      - tests/test_moderation.py
+      - tests/test_app.py
+      - docs/CONFIGURATION.md
+    notes: An opt-in engine protocol, deterministic local baseline, organization-specific literal terms, input/output monitor-or-block actions, fail-open/fail-closed behavior, explicit streaming policy, cache invalidation, and content-free metadata/logs/metrics are implemented; full CI, governed corpus calibration, latency benchmarks, and versioned third-party engine loading remain pending.
   - {id: GOV-INJECT-001, pillar: governance, name: Prompt-injection risk policy, status: planned, target: v0.7}
   - {id: GOV-RESIDENCY-001, pillar: governance, name: Data residency enforcement, status: planned, target: v0.9, depends_on: [ROUTE-POLICY-001]}
   - {id: SEC-ENC-001, pillar: governance, name: Envelope encryption for persisted sensitive fields, status: planned, target: v0.9}
