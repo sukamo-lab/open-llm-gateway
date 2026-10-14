@@ -11,6 +11,7 @@ It has two explicit profiles: a minimal single-user mode and a fully managed mul
 - Feature-flagged embeddings API with batching, token-array input, quotas, retries, and free-first failover.
 - Feature-flagged OpenAI-compatible text moderation API with bounded batches and no provider call.
 - Feature-flagged text-to-speech API with capability routing, quotas, retries, and free-first failover.
+- Feature-flagged image generation API with URL/base64 results and capability-aware failover.
 - Capability-aware routing for chat, reasoning, vision, tools, and JSON workloads.
 - Strict free-before-paid ordering with optional prohibition of paid fallback.
 - Persistent atomic rolling quotas for requests and tokens.
@@ -92,6 +93,8 @@ Invoke-RestMethod http://localhost:8000/v1/moderations `
 ```
 
 For text-to-speech, enable `features.audio_api`, configure an `audio_speech`-capable model, and call `POST /v1/audio/speech`.
+
+For image generation, enable `features.images_api`, configure an `image_generation`-capable model, and call `POST /v1/images/generations`.
 
 ## Routing behavior
 

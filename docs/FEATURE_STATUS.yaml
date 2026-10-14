@@ -78,7 +78,20 @@ features:
       - tests/test_app.py
       - docs/CONFIGURATION.md
     notes: A feature-flagged OpenAI-compatible text-to-speech endpoint supports bounded input and response sizes, common output formats, capability-aware free-first routing, quotas, concurrency, retries, failover, circuits, tracing, metrics, and binary responses; transcription, translation, streaming audio, input governance, provider compatibility CI, character/audio billing, and latency benchmarks remain pending.
-  - {id: API-IMAGE-001, pillar: unified_api, name: Image generation API, status: planned, target: v0.8}
+  - id: API-IMAGE-001
+    pillar: unified_api
+    name: Image generation API
+    status: partial
+    target: v0.8
+    evidence:
+      - src/llm_gateway/images_api.py
+      - src/llm_gateway/router.py
+      - src/llm_gateway/app.py
+      - tests/test_images_api.py
+      - tests/test_router.py
+      - tests/test_app.py
+      - docs/CONFIGURATION.md
+    notes: A feature-flagged OpenAI-compatible generations endpoint supports bounded prompts/counts/response sizes, URL or base64 results, capability-aware free-first routing, quotas, concurrency, retries, failover, circuits, tracing, metrics, and strict response validation; edits, variations, direct binary delivery, prompt governance, provider compatibility CI, image-specific billing, and latency benchmarks remain pending.
   - id: API-IDEMP-001
     pillar: unified_api
     name: Idempotency keys

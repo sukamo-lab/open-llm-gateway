@@ -109,6 +109,31 @@ providers:
 
 Speech requests use free-before-paid selection, quotas, concurrency limits, retries, failover, circuits, tracing, and provider metrics. Successful responses contain audio bytes and `X-Gateway-Provider`/`X-Gateway-Upstream-Model` headers. JSON/text success bodies and oversized responses are rejected as malformed. Idempotency is not yet supported. Transcription, translation, streaming audio, input governance, live-provider compatibility, and calibrated character/audio billing remain pending.
 
+## Image generation API
+
+`features.images_api` exposes `POST /v1/images/generations`; it is disabled by default in both modes and removed from routing and OpenAPI when disabled. Image models declare `capabilities: [image_generation]`. Providers may override `image_generations_path` and `image_request_defaults`.
+
+```yaml
+features:
+  images_api: true
+images:
+  max_prompt_characters: 32000
+  max_images: 4
+  max_response_bytes: 50000000
+  response_formats: [url, b64_json]
+providers:
+  - name: image-provider
+    base_url: https://provider.example/v1
+    api_key_env: IMAGE_API_KEY
+    image_generations_path: /images/generations
+    models:
+      - name: image
+        upstream_model: provider-image-model
+        capabilities: [image_generation]
+```
+
+The endpoint accepts a prompt plus optional model, count, quality, size, style, response format, and user identifier. It validates the returned image count and requires every result to contain the requested URL or base64 field. Oversized and malformed upstream responses trigger provider failover. Requests use normal free-before-paid selection, quotas, concurrency, retries, circuits, tracing, and metrics. Idempotency, prompt governance, image edits/variations, direct binary delivery, provider compatibility CI, and image-specific billing remain pending.
+
 ## Structured logging
 
 `features.structured_logging` enables newline-delimited JSON logs. It defaults off in single-user mode and on in multi-user mode. When disabled, request correlation and provider log calls are absent from the hot path.
