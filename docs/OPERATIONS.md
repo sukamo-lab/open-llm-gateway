@@ -69,6 +69,10 @@ An unauthenticated gateway is permitted only on a localhost bind. Readiness fail
 
 Transport errors, rate limits, invalid credentials, removed models, and malformed upstream responses count as failures. At the configured threshold, that provider is skipped during its cooldown. A later successful request closes the circuit. Local configured quotas skip a provider without counting as an upstream failure.
 
+## Retry and streaming recovery
+
+Same-provider retries honor the configured attempt limit, exponential backoff, jitter, `Retry-After`, and per-provider request deadline for both ordinary and streaming chat requests. A stream can retry or fail over only before its first byte reaches the client. If an upstream connection fails after SSE output starts, the gateway terminates the client stream and records the failed attempt; it never appends output from another attempt or provider. Clients should treat an interrupted stream as incomplete and decide whether the whole request is safe to submit again.
+
 ## Load and latency testing
 
 Measure local gateway overhead separately from provider latency:

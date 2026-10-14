@@ -26,6 +26,12 @@ def provider(name, tier, key_env, models, priority_limit=None):
     return result
 
 
+class BrokenAfterFirstChunk(httpx.AsyncByteStream):
+    async def __aiter__(self):
+        yield b"data: first\n\n"
+        raise httpx.ReadError("stream interrupted")
+
+
 def test_free_models_precede_paid_and_reasoning_is_required(tmp_path, monkeypatch):
     for key in ("FREE_KEY", "PAID_KEY"):
         monkeypatch.setenv(key, "secret")
@@ -409,6 +415,96 @@ async def test_non_transient_error_does_not_retry(tmp_path, monkeypatch):
         with pytest.raises(Exception):
             await GatewayRouter(config, quota, client).complete({"model": "chat", "messages": []})
     assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_retries_retryable_status_before_emitting_bytes(tmp_path, monkeypatch):
+    monkeypatch.setenv("FREE_KEY", "secret")
+    config = make_config(
+        tmp_path,
+        [provider("free", "free", "FREE_KEY", [{"name": "chat", "upstream_model": "free"}])],
+    )
+    config.routing.retry_attempts = 2
+    config.routing.retry_initial_backoff_seconds = 0
+    calls = 0
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(429, headers={"Retry-After": "0"}, content=b"limited")
+        return httpx.Response(200, content=b"data: success\n\n")
+
+    quota = QuotaStore(config.database)
+    await quota.initialize()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        chunks = [chunk async for chunk in GatewayRouter(config, quota, client).stream({
+            "model": "chat", "messages": [{"role": "user", "content": "hello"}],
+        })]
+
+    assert b"".join(chunks) == b"data: success\n\n"
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_stream_retries_transport_failure_before_emitting_bytes(tmp_path, monkeypatch):
+    monkeypatch.setenv("FREE_KEY", "secret")
+    config = make_config(
+        tmp_path,
+        [provider("free", "free", "FREE_KEY", [{"name": "chat", "upstream_model": "free"}])],
+    )
+    config.routing.retry_attempts = 2
+    config.routing.retry_initial_backoff_seconds = 0
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.ConnectError("connection refused", request=request)
+        return httpx.Response(200, content=b"data: recovered\n\n")
+
+    quota = QuotaStore(config.database)
+    await quota.initialize()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        chunks = [chunk async for chunk in GatewayRouter(config, quota, client).stream({
+            "model": "chat", "messages": [],
+        })]
+
+    assert b"".join(chunks) == b"data: recovered\n\n"
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_stream_never_retries_or_fails_over_after_emitting_bytes(tmp_path, monkeypatch):
+    monkeypatch.setenv("FREE_KEY", "secret")
+    monkeypatch.setenv("PAID_KEY", "secret")
+    config = make_config(tmp_path, [
+        provider("free", "free", "FREE_KEY", [{"name": "chat", "upstream_model": "free"}]),
+        provider("paid", "paid", "PAID_KEY", [{"name": "chat", "upstream_model": "paid"}]),
+    ])
+    config.routing.retry_attempts = 2
+    config.routing.retry_initial_backoff_seconds = 0
+    calls = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.host)
+        if request.url.host == "free.example":
+            return httpx.Response(200, stream=BrokenAfterFirstChunk())
+        return httpx.Response(200, content=b"data: paid\n\n")
+
+    quota = QuotaStore(config.database)
+    await quota.initialize()
+    received = []
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(httpx.ReadError):
+            async for chunk in GatewayRouter(config, quota, client).stream({
+                "model": "chat", "messages": [],
+            }):
+                received.append(chunk)
+
+    assert received == [b"data: first\n\n"]
+    assert calls == ["free.example"]
 
 
 @pytest.mark.asyncio

@@ -177,12 +177,16 @@ features:
     name: Deadline-aware exponential retry with jitter
     status: partial
     target: v0.6
+    verified: 2026-10-14
+    depends_on: []
     evidence:
       - src/llm_gateway/router.py
       - src/llm_gateway/config.py
       - tests/test_router.py
       - docs/CONFIGURATION.md
-    notes: Configurable bounded retries, jitter, Retry-After, deadlines, and attempt metadata are implemented for non-streaming calls; streaming retry parity and executable test-suite verification remain pending.
+      - docs/OPERATIONS.md
+      - CHANGELOG.md
+    notes: Configurable bounded retries, jitter, Retry-After, deadlines, metrics, logs, and attempt metadata cover non-streaming calls and streaming failures before the first byte. An interrupted stream is never retried or failed over after bytes are emitted, preventing mixed-provider SSE output. Status remains partial pending hosted Windows/Linux CI and live-provider streaming verification; replay of an interrupted stream remains a client decision because partial output cannot be safely withdrawn.
   - {id: RES-DISTCB-001, pillar: resilience, name: Distributed circuit and concurrency coordination, status: planned, target: v1.0}
   - id: CACHE-EXACT-001
     pillar: resilience

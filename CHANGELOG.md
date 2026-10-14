@@ -26,6 +26,7 @@ All notable product changes are recorded here. The project follows [Semantic Ver
 - Controlled read-only upstream model discovery with bounded catalogs, filters, and drift reports.
 - Opt-in deterministic least-cost routing with unknown-price policy and explainable decisions.
 - Opt-in latency-aware routing with per-operation EWMA, cold starts, and deterministic exploration.
+- Deadline-aware streaming retries before the first SSE byte, with explicit termination instead of mixed-provider output after a stream starts.
 
 ## [0.5.0] - 2026-10-13
 

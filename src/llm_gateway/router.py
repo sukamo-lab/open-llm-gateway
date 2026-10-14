@@ -795,57 +795,123 @@ class GatewayRouter:
             if reservation is None:
                 quota_skips += 1
                 continue
-            attempt_started = time.monotonic()
-            try:
-                async with self.client.stream(
-                    "POST",
-                    self._url(candidate.provider),
-                    headers=self._headers(candidate.provider),
-                    json=self._upstream_payload(candidate, payload, stream=True),
-                    timeout=candidate.provider.timeout_seconds,
-                ) as response:
-                    if response.status_code in FAILOVER_STATUS:
-                        await response.aread()
-                        await self.quota.reconcile(reservation, None, False)
+            routing = self.config.routing
+            started = time.monotonic()
+            deadline = started + routing.request_deadline_seconds if routing.request_deadline_seconds else None
+            candidate_failed = False
+            for attempt in range(1, routing.retry_attempts + 1):
+                remaining = deadline - time.monotonic() if deadline else None
+                if remaining is not None and remaining <= 0:
+                    candidate_failed = True
+                    break
+                timeout = (
+                    min(candidate.provider.timeout_seconds, remaining)
+                    if remaining is not None else candidate.provider.timeout_seconds
+                )
+                attempt_started = time.monotonic()
+                emitted = False
+                trace_handle = (
+                    self.telemetry.start_provider(
+                        candidate.provider.name, candidate.model.name,
+                        candidate.model.upstream_model, attempt, "chat.stream",
+                    )
+                    if self.telemetry is not None else None
+                )
+                try:
+                    async with self.client.stream(
+                        "POST",
+                        self._url(candidate.provider),
+                        headers=self._headers(candidate.provider),
+                        json=self._upstream_payload(candidate, payload, stream=True),
+                        timeout=timeout,
+                    ) as response:
+                        if response.status_code in RETRY_STATUS and attempt < routing.retry_attempts:
+                            await response.aread()
+                            if trace_handle is not None:
+                                self.telemetry.finish_provider(trace_handle, status_code=response.status_code)
+                            elapsed_ms = (time.monotonic() - attempt_started) * 1000
+                            await self.metrics.provider_request(
+                                candidate.provider.name, candidate.model.name, candidate.provider.tier,
+                                "error", str(response.status_code), elapsed_ms,
+                            )
+                            delay = self._retry_delay(response, attempt)
+                            if deadline is not None and time.monotonic() + delay >= deadline:
+                                candidate_failed = True
+                                break
+                            await self._record_retry(candidate, attempt, f"http_{response.status_code}", delay)
+                            if delay:
+                                await asyncio.sleep(delay)
+                            continue
+                        if response.status_code in FAILOVER_STATUS:
+                            await response.aread()
+                            if trace_handle is not None:
+                                self.telemetry.finish_provider(trace_handle, status_code=response.status_code)
+                            await self.metrics.provider_request(
+                                candidate.provider.name, candidate.model.name, candidate.provider.tier,
+                                "error", str(response.status_code),
+                                (time.monotonic() - attempt_started) * 1000,
+                            )
+                            candidate_failed = True
+                            break
+                        response.raise_for_status()
+                        async for chunk in response.aiter_bytes():
+                            emitted = True
+                            yield chunk
+                        elapsed_ms = (time.monotonic() - attempt_started) * 1000
+                        if trace_handle is not None:
+                            self.telemetry.finish_provider(trace_handle, status_code=response.status_code)
+                        # Streaming usage is provider-dependent; retain the conservative reservation.
+                        await self.quota.reconcile(reservation, None, True)
                         await self.metrics.provider_request(
                             candidate.provider.name, candidate.model.name, candidate.provider.tier,
-                            "error", str(response.status_code),
-                            (time.monotonic() - attempt_started) * 1000,
+                            "success", str(response.status_code), elapsed_ms,
                         )
-                        await self._failed(candidate)
-                        continue
-                    response.raise_for_status()
-                    async for chunk in response.aiter_bytes():
-                        yield chunk
-                    # Streaming usage is provider-dependent; retain the conservative reservation.
-                    await self.quota.reconcile(reservation, None, True)
+                        self._observe_latency(candidate, "chat", elapsed_ms)
+                        await self._succeeded(candidate)
+                        return
+                except httpx.HTTPError as exc:
+                    if trace_handle is not None:
+                        self.telemetry.finish_provider(trace_handle, error_type=type(exc).__name__)
                     await self.metrics.provider_request(
                         candidate.provider.name, candidate.model.name, candidate.provider.tier,
-                        "success", str(response.status_code),
-                        (time.monotonic() - attempt_started) * 1000,
+                        "error", "transport_error", (time.monotonic() - attempt_started) * 1000,
                     )
-                    self._observe_latency(
-                        candidate, "chat", (time.monotonic() - attempt_started) * 1000
-                    )
-                    await self._succeeded(candidate)
-                    return
-            except httpx.HTTPError as exc:
-                await self.quota.reconcile(reservation, None, False)
-                status = (
-                    str(exc.response.status_code)
-                    if isinstance(exc, httpx.HTTPStatusError) else "transport_error"
-                )
-                await self.metrics.provider_request(
-                    candidate.provider.name, candidate.model.name, candidate.provider.tier,
-                    "error", status,
-                    (time.monotonic() - attempt_started) * 1000,
-                )
+                    if emitted:
+                        # A second provider or attempt would corrupt the already-started SSE response.
+                        await self.quota.reconcile(reservation, None, False)
+                        await self._failed(candidate)
+                        raise
+                    if attempt < routing.retry_attempts:
+                        delay = self._retry_delay(None, attempt)
+                        if deadline is None or time.monotonic() + delay < deadline:
+                            await self._record_retry(candidate, attempt, "transport", delay)
+                            if delay:
+                                await asyncio.sleep(delay)
+                            continue
+                    candidate_failed = True
+                    break
+            await self.quota.reconcile(reservation, None, False)
+            if candidate_failed:
                 await self._failed(candidate)
                 continue
         attempted = min(max_attempts, len(candidates))
         if attempted and quota_skips == attempted:
             raise QuotaExceeded("all eligible providers are quota exhausted")
         raise NoModelAvailable("no available model could start the stream")
+
+    async def _record_retry(
+        self, candidate: Candidate, attempt: int, reason: str, delay: float,
+    ) -> None:
+        await self.metrics.retry(candidate.provider.name, candidate.model.name, reason)
+        if self.log_provider_attempts:
+            logger.warning(
+                "Retrying provider request",
+                extra={"event_name": "provider.retry", "provider": candidate.provider.name,
+                       "model": candidate.model.name,
+                       "upstream_model": candidate.model.upstream_model,
+                       "attempt": attempt, "retry_reason": reason,
+                       "retry_delay_seconds": round(delay, 3), "outcome": "retry"},
+            )
 
     async def _post(self, candidate: Candidate, payload: dict[str, Any], stream: bool) -> httpx.Response:
         return await self.client.post(
@@ -912,18 +978,7 @@ class GatewayRouter:
                 retry_reason = "transport"
             if deadline is not None and time.monotonic() + delay >= deadline:
                 break
-            await self.metrics.retry(
-                candidate.provider.name, candidate.model.name, retry_reason
-            )
-            if self.log_provider_attempts:
-                logger.warning(
-                    "Retrying provider request",
-                    extra={"event_name": "provider.retry", "provider": candidate.provider.name,
-                           "model": candidate.model.name,
-                           "upstream_model": candidate.model.upstream_model,
-                           "attempt": attempt, "retry_reason": retry_reason,
-                           "retry_delay_seconds": round(delay, 3), "outcome": "retry"},
-                )
+            await self._record_retry(candidate, attempt, retry_reason, delay)
             if delay:
                 await asyncio.sleep(delay)
         if last_error is not None:
