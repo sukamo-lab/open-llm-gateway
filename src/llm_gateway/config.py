@@ -156,6 +156,7 @@ class GatewayConfig(StrictModel):
                 "images_api": False,
                 "model_discovery": False,
                 "cost_routing": False,
+                "latency_routing": False,
             },
             "multi": {
                 "authentication": True, "admin_api": True, "managed_keys": True,
@@ -175,6 +176,7 @@ class GatewayConfig(StrictModel):
                 "images_api": False,
                 "model_discovery": False,
                 "cost_routing": False,
+                "latency_routing": False,
             },
         }[self.mode]
         for name, default in defaults.items():
@@ -190,6 +192,8 @@ class GatewayConfig(StrictModel):
             raise ValueError("cost_tracking requires usage_accounting")
         if self.features.model_discovery and not self.features.admin_api:
             raise ValueError("model_discovery requires admin_api")
+        if self.features.cost_routing and self.features.latency_routing:
+            raise ValueError("cost_routing and latency_routing are mutually exclusive")
         if self.features.exact_cache and self.cache.backend == "redis" and not self.cache.redis_url():
             raise ValueError(f"exact_cache Redis backend requires {self.cache.redis_url_env}")
         return self
@@ -281,6 +285,8 @@ class GatewayConfig(StrictModel):
             if not priced_models:
                 severity = "ERROR" if self.routing.unknown_price_policy == "exclude" else "WARN"
                 issues.append((severity, "cost routing has no models with known pricing"))
+        if self.features.latency_routing and self.server.workers > 1:
+            issues.append(("WARN", "latency routing observations are process-local across workers"))
         endpoint = self.telemetry.endpoint()
         if self.features.tracing and endpoint and endpoint.startswith("http://"):
             issues.append(("WARN", "OpenTelemetry exporter endpoint is not encrypted"))
@@ -335,6 +341,10 @@ class RoutingConfig(StrictModel):
     allow_provider_override: bool = False
     paid_fallback: bool = True
     unknown_price_policy: Literal["last", "exclude"] = "last"
+    latency_ewma_alpha: float = Field(default=0.2, gt=0, le=1)
+    latency_cold_start_ms: float = Field(default=1000, gt=0, le=3_600_000)
+    latency_min_samples: int = Field(default=3, ge=1, le=10_000)
+    latency_exploration_interval: int = Field(default=20, ge=0, le=1_000_000)
     http_max_connections: int = Field(default=200, gt=0)
     http_max_keepalive_connections: int = Field(default=50, ge=0)
     http_keepalive_expiry_seconds: float = Field(default=30, gt=0)
@@ -595,6 +605,7 @@ class FeatureConfig(StrictModel):
     images_api: bool | None = None
     model_discovery: bool | None = None
     cost_routing: bool | None = None
+    latency_routing: bool | None = None
 
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")

@@ -279,3 +279,22 @@ def test_cost_routing_is_opt_in_and_pricing_metadata_is_bounded():
             }]}],
         })
 
+
+def test_latency_routing_is_opt_in_and_exclusive_with_cost_routing():
+    provider = {
+        "name": "p", "base_url": "https://example.test/v1", "api_key_value": "key",
+        "models": [{"name": "fast", "upstream_model": "model"}],
+    }
+    assert GatewayConfig.model_validate({"providers": [provider]}).features.latency_routing is False
+    configured = GatewayConfig.model_validate({
+        "features": {"latency_routing": True},
+        "routing": {"latency_ewma_alpha": 0.5, "latency_exploration_interval": 0},
+        "providers": [provider],
+    })
+    assert configured.features.latency_routing is True
+    with pytest.raises(ValidationError, match="mutually exclusive"):
+        GatewayConfig.model_validate({
+            "features": {"latency_routing": True, "cost_routing": True},
+            "providers": [provider],
+        })
+

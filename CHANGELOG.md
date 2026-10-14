@@ -25,6 +25,7 @@ All notable product changes are recorded here. The project follows [Semantic Ver
 - Feature-flagged image generation API with bounded prompts, URL/base64 validation, and provider failover.
 - Controlled read-only upstream model discovery with bounded catalogs, filters, and drift reports.
 - Opt-in deterministic least-cost routing with unknown-price policy and explainable decisions.
+- Opt-in latency-aware routing with per-operation EWMA, cold starts, and deterministic exploration.
 
 ## [0.5.0] - 2026-10-13
 

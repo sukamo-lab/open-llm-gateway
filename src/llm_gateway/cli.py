@@ -82,6 +82,7 @@ features:
   images_api: false
   model_discovery: false
   cost_routing: false
+  latency_routing: false
 server:
   host: 127.0.0.1
   port: 8000
