@@ -89,6 +89,31 @@ class BodyLimitMiddleware:
             )(scope, receive, send)
 
 
+def request_with_json(request: Request, payload: dict[str, Any]) -> Request:
+    """Create an internal request that preserves auth/context but substitutes a JSON body."""
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    scope = dict(request.scope)
+    headers = [
+        (name, value) for name, value in scope.get("headers", [])
+        if name.lower() not in {b"content-length", b"content-type"}
+    ]
+    headers.extend([
+        (b"content-type", b"application/json"),
+        (b"content-length", str(len(body)).encode("ascii")),
+    ])
+    scope["headers"] = headers
+    sent = False
+
+    async def receive():
+        nonlocal sent
+        if sent:
+            return {"type": "http.request", "body": b"", "more_body": False}
+        sent = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    return Request(scope, receive)
+
+
 def create_app(config_path: str = "config.yaml") -> FastAPI:
     config = load_config(config_path)
     quota_enabled = bool(
@@ -339,8 +364,12 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         return value[7:] if value.lower().startswith("bearer ") else ""
 
     async def require_api(request: Request) -> AuthContext:
+        existing = getattr(request.state, "auth_context", None)
+        if existing is not None:
+            return existing
         if not config.features.authentication:
             context = AuthContext("anonymous", "anonymous")
+            request.state.auth_context = context
             request.state.tenant_id = context.tenant_id
             if config.features.structured_logging:
                 bind_tenant(context.tenant_id)
@@ -352,6 +381,7 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             if secrets.compare_digest(token, key):
                 identity = hashlib.sha256(key.encode()).hexdigest()[:16]
                 context = AuthContext(f"bootstrap-{identity}", f"bootstrap-{identity}")
+                request.state.auth_context = context
                 request.state.tenant_id = context.tenant_id
                 if config.features.structured_logging:
                     bind_tenant(context.tenant_id)
@@ -361,6 +391,7 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         if config.features.managed_keys and identities is not None and token:
             context = await identities.authenticate(token)
             if context:
+                request.state.auth_context = context
                 request.state.tenant_id = context.tenant_id
                 if config.features.structured_logging:
                     bind_tenant(context.tenant_id)
@@ -439,7 +470,11 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
     async def root() -> dict[str, object]:
         return {
             "name": "LLM Gateway", "version": __version__, "status": "ok",
-            "endpoints": {"health": "/health", "ready": "/ready", "models": "/v1/models", "docs": "/docs" if config.server.docs_enabled else None},
+            "endpoints": {
+                "health": "/health", "ready": "/ready", "models": "/v1/models",
+                **({"responses": "/v1/responses"} if config.features.responses_api else {}),
+                "docs": "/docs" if config.server.docs_enabled else None,
+            },
         }
 
     @app.get("/ready")
@@ -923,6 +958,41 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             return JSONResponse(content=result, headers=response_headers)
         return result
 
+    @app.post("/v1/responses")
+    async def responses(request: Request):
+        await require_api(request)
+        try:
+            payload = await request.json()
+        except ValueError as exc:
+            raise HTTPException(400, "request body must contain valid JSON") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(400, "request body must be a JSON object")
+        from .responses_api import ResponsesAdapterError, from_chat_response, to_chat_payload
+
+        try:
+            chat_payload = to_chat_payload(payload, config.responses)
+        except ResponsesAdapterError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        chat_result = await chat(request_with_json(request, chat_payload))
+        status_code = 200
+        headers: dict[str, str] = {}
+        if isinstance(chat_result, JSONResponse):
+            status_code = chat_result.status_code
+            body = json.loads(chat_result.body)
+            headers = {
+                name: value for name, value in chat_result.headers.items()
+                if name.lower() not in {"content-length", "content-type"}
+            }
+        else:
+            body = chat_result
+        try:
+            response_body = from_chat_response(body)
+        except ResponsesAdapterError as exc:
+            raise HTTPException(502, "upstream response could not be adapted") from exc
+        response_body["metadata"] = payload.get("metadata") or {}
+        response_body["parallel_tool_calls"] = payload.get("parallel_tool_calls", True)
+        return JSONResponse(content=response_body, status_code=status_code, headers=headers)
+
     disabled_paths: set[str] = set()
     if not config.features.admin_api:
         disabled_paths.update(
@@ -941,6 +1011,8 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             disabled_paths.add("/admin/usage/tenants")
     if not config.features.metrics:
         disabled_paths.add("/metrics")
+    if not config.features.responses_api:
+        disabled_paths.add("/v1/responses")
     app.router.routes = [
         route for route in app.router.routes
         if getattr(route, "path", None) not in disabled_paths

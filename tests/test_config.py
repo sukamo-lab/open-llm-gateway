@@ -176,3 +176,14 @@ def test_prompt_injection_is_opt_in_and_route_policy_requires_safe_model():
         for severity, message in safe_config.diagnostics()
     )
 
+
+def test_responses_api_is_opt_in_and_limits_are_validated():
+    provider = {
+        "name": "p", "base_url": "https://example.test/v1", "api_key_value": "key",
+        "models": [{"name": "fast", "upstream_model": "model"}],
+    }
+    assert GatewayConfig.model_validate({"mode": "single", "providers": [provider]}).features.responses_api is False
+    assert GatewayConfig.model_validate({"mode": "multi", "providers": [provider]}).features.responses_api is False
+    with pytest.raises(ValidationError):
+        GatewayConfig.model_validate({"responses": {"max_input_items": 0}, "providers": [provider]})
+

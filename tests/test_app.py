@@ -127,3 +127,47 @@ def test_prompt_injection_route_marks_request_for_safe_model(tmp_path, monkeypat
     assert captured["require_injection_safe"] is True
     assert response.json()["gateway"]["prompt_injection"]["route_required"] is True
 
+
+def test_responses_api_is_feature_flagged_and_uses_chat_pipeline(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROVIDER_KEY", "secret")
+    disabled_config = tmp_path / "disabled.yaml"
+    disabled_config.write_text(
+        "providers:\n  - name: p\n    base_url: https://example.test/v1\n"
+        "    api_key_env: PROVIDER_KEY\n    models:\n"
+        "      - {name: fast, upstream_model: model}\n",
+        encoding="utf-8",
+    )
+    with TestClient(create_app(str(disabled_config)), raise_server_exceptions=False) as client:
+        assert client.post("/v1/responses", json={"input": "hello"}).status_code == 404
+
+    enabled_config = tmp_path / "enabled.yaml"
+    enabled_config.write_text(
+        "features:\n  responses_api: true\n"
+        "providers:\n  - name: p\n    base_url: https://example.test/v1\n"
+        "    api_key_env: PROVIDER_KEY\n    models:\n"
+        "      - {name: fast, upstream_model: model}\n",
+        encoding="utf-8",
+    )
+    captured = {}
+
+    async def complete_for(payload, _tenant_id, _limits, _require_injection_safe=False):
+        captured.update(payload)
+        return ({
+            "id": "chatcmpl-test", "created": 100, "model": "fast",
+            "choices": [{"finish_reason": "stop", "message": {"content": "Hello"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }, "p", "model")
+
+    with TestClient(create_app(str(enabled_config)), raise_server_exceptions=False) as client:
+        client.app.state.router.complete_for = complete_for
+        response = client.post("/v1/responses", json={
+            "model": "fast", "input": "Hi", "metadata": {"request": "demo"},
+        })
+
+    assert response.status_code == 200
+    assert captured["messages"] == [{"role": "user", "content": "Hi"}]
+    assert response.json()["object"] == "response"
+    assert response.json()["output"][0]["content"][0]["text"] == "Hello"
+    assert response.json()["gateway"]["provider"] == "p"
+    assert response.json()["metadata"] == {"request": "demo"}
+

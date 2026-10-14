@@ -20,6 +20,7 @@ features:
   pii_detection: false
   moderation: false
   prompt_injection: false
+  responses_api: false
 
 server:
   host: 0.0.0.0
@@ -127,6 +128,11 @@ prompt_injection:
   scan_roles: [user, tool]
   max_scan_characters: 1000000
   failure_mode: closed
+
+responses:
+  max_input_items: 1000
+  max_tools: 128
+  max_metadata_entries: 16
 
 providers:
   - name: google-free

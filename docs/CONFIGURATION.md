@@ -39,6 +39,14 @@ Model aliases decouple clients from vendor model IDs. Capabilities document supp
 
 OpenAI-compatible variants can customize `chat_completions_path`, `api_key_header`, `api_key_prefix`, provider `request_defaults`, model `request_overrides`, and arbitrary headers without adding a new adapter. Client request values take precedence over configured defaults and overrides.
 
+## Responses API
+
+`features.responses_api` exposes `POST /v1/responses`; it is disabled by default in both modes and removed from routing and OpenAPI when disabled. The endpoint translates supported Responses requests into the existing chat pipeline, so authentication, tenant isolation, governance stages, exact caching, idempotency, quotas, free-before-paid routing, retries, and provider failover remain identical.
+
+Supported request behavior includes string or message-array input, instructions, text and image-URL content, function-call history and output, function tools and tool choice, reasoning effort, maximum output tokens, temperature/top-p, parallel tools, and text/JSON/JSON-schema output formats. `responses.max_input_items` and `max_tools` bound adapter work before provider invocation.
+
+The adapter returns response objects with message and function-call output items, usage, incomplete status for token limits, and the gateway's provider metadata. It deliberately rejects streaming, background mode, hosted storage, files, conversations, prompts, and previous-response chaining rather than silently changing their semantics. These limitations remain recorded under `API-RESP-001`; use `/v1/chat/completions` for streaming until Responses SSE translation is implemented and compatibility-tested.
+
 ## Structured logging
 
 `features.structured_logging` enables newline-delimited JSON logs. It defaults off in single-user mode and on in multi-user mode. When disabled, request correlation and provider log calls are absent from the hot path.
