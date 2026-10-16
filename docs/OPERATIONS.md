@@ -33,6 +33,10 @@ For least-cost routing, keep pricing metadata under change control and alert on 
 
 For latency routing, begin with a conservative cold-start estimate and exploration interval, then inspect `/admin/providers` observations and existing provider-duration histograms. EWMA state resets on process restart and differs across workers/replicas; use one worker when consistent selection is required. Setting exploration to `0` disables sampling but can leave a temporarily slow candidate permanently disadvantaged.
 
+For declarative routing policies, treat region, residency, and quality metadata as controlled operator assertions. Prefer `fallback: deny` for residency-sensitive traffic; `default` explicitly relaxes the rule when no constrained candidate is available. Keep client policy override disabled unless callers are separately authorized to choose among configured policies.
+
+When configuration reload is enabled, validate candidate files with `llm-gateway --check` before calling `POST /admin/config/reload`. A successful response applies only routing and provider/model changes to that process. Rejected files preserve the last-known-good router. Reload every replica and compare the returned generation, or use a rolling restart. Restart before `max_generations` is exhausted and whenever changing features, authentication, storage, middleware, or exact-cache configuration.
+
 `llm-gateway --init --init-mode single` creates the no-database minimal profile. `--init-mode multi` creates secured consumer/admin credentials and enables the managed feature set.
 
 `llm-gateway --migration-status --output json` reports component schema versions without changing them. `llm-gateway --migrate` applies pending migrations and is suitable for a deployment pre-start job. See [Database migrations](DATABASE_MIGRATIONS.md).
@@ -68,6 +72,10 @@ An unauthenticated gateway is permitted only on a localhost bind. Readiness fail
 ## Circuit breaker
 
 Transport errors, rate limits, invalid credentials, removed models, and malformed upstream responses count as failures. At the configured threshold, that provider is skipped during its cooldown. A later successful request closes the circuit. Local configured quotas skip a provider without counting as an upstream failure.
+
+## Retry and streaming recovery
+
+Same-provider retries honor the configured attempt limit, exponential backoff, jitter, `Retry-After`, and per-provider request deadline for both ordinary and streaming chat requests. A stream can retry or fail over only before its first byte reaches the client. If an upstream connection fails after SSE output starts, the gateway terminates the client stream and records the failed attempt; it never appends output from another attempt or provider. Clients should treat an interrupted stream as incomplete and decide whether the whole request is safe to submit again.
 
 ## Load and latency testing
 

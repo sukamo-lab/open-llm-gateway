@@ -298,3 +298,48 @@ def test_latency_routing_is_opt_in_and_exclusive_with_cost_routing():
             "providers": [provider],
         })
 
+
+def test_routing_policy_is_opt_in_and_strictly_validated():
+    provider = {
+        "name": "p", "base_url": "https://example.test/v1", "api_key_value": "key",
+        "models": [{"name": "fast", "upstream_model": "model"}],
+    }
+    assert GatewayConfig.model_validate({"providers": [provider]}).features.routing_policy is False
+    with pytest.raises(ValidationError, match="requires at least one"):
+        GatewayConfig.model_validate({
+            "features": {"routing_policy": True}, "providers": [provider],
+        })
+    with pytest.raises(ValidationError, match="names must be unique"):
+        GatewayConfig.model_validate({
+            "features": {"routing_policy": True},
+            "routing": {"policies": [{"name": "same"}, {"name": "same"}]},
+            "providers": [provider],
+        })
+    configured = GatewayConfig.model_validate({
+        "features": {"routing_policy": True},
+        "routing": {"policies": [{
+            "name": "eu-quality", "regions": ["eu-west"],
+            "residencies": ["eu"], "min_quality": 80,
+        }]},
+        "providers": [provider],
+    })
+    assert configured.routing.policies[0].fallback == "deny"
+
+
+def test_config_reload_requires_admin_and_rejects_exact_cache():
+    provider = {
+        "name": "p", "base_url": "https://example.test/v1", "api_key_value": "key",
+        "models": [{"name": "fast", "upstream_model": "model"}],
+    }
+    assert GatewayConfig.model_validate({"providers": [provider]}).features.config_reload is False
+    with pytest.raises(ValidationError, match="requires admin_api"):
+        GatewayConfig.model_validate({
+            "features": {"config_reload": True, "admin_api": False},
+            "providers": [provider],
+        })
+    with pytest.raises(ValidationError, match="cannot be combined"):
+        GatewayConfig.model_validate({
+            "features": {"config_reload": True, "admin_api": True, "exact_cache": True},
+            "providers": [provider],
+        })
+

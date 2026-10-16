@@ -43,6 +43,7 @@ class ModelConfig(StrictModel):
     pricing_version: str | None = Field(default=None, min_length=1, max_length=64)
     request_overrides: dict[str, object] = Field(default_factory=dict)
     prompt_injection_safe: bool = False
+    quality: int = Field(default=50, ge=0, le=100)
 
     @model_validator(mode="after")
     def normalize_capabilities(self) -> "ModelConfig":
@@ -66,6 +67,8 @@ class ProviderConfig(StrictModel):
     api_key_header: str = "Authorization"
     api_key_prefix: str = "Bearer"
     tier: Literal["free", "paid"] = "free"
+    region: str | None = Field(default=None, min_length=1, max_length=64)
+    residencies: set[str] = Field(default_factory=set, max_length=32)
     enabled: bool = True
     timeout_seconds: float = Field(default=120, gt=0)
     headers: dict[str, str] = Field(default_factory=dict)
@@ -104,6 +107,10 @@ class ProviderConfig(StrictModel):
         names = [model.name for model in self.models]
         if len(names) != len(set(names)):
             raise ValueError("model aliases must be unique within a provider")
+        if self.region is not None and not self.region.strip():
+            raise ValueError("provider region must not be blank")
+        if any(not value or len(value) > 128 for value in self.residencies):
+            raise ValueError("provider residencies must be bounded non-empty strings")
         return self
 
 
@@ -127,6 +134,7 @@ class GatewayConfig(StrictModel):
     audio: "AudioConfig" = Field(default_factory=lambda: AudioConfig())
     images: "ImagesConfig" = Field(default_factory=lambda: ImagesConfig())
     model_discovery: "ModelDiscoveryConfig" = Field(default_factory=lambda: ModelDiscoveryConfig())
+    config_reload: "ConfigReloadConfig" = Field(default_factory=lambda: ConfigReloadConfig())
     features: "FeatureConfig" = Field(default_factory=lambda: FeatureConfig())
     providers: list[ProviderConfig]
 
@@ -157,6 +165,8 @@ class GatewayConfig(StrictModel):
                 "model_discovery": False,
                 "cost_routing": False,
                 "latency_routing": False,
+                "routing_policy": False,
+                "config_reload": False,
             },
             "multi": {
                 "authentication": True, "admin_api": True, "managed_keys": True,
@@ -177,6 +187,8 @@ class GatewayConfig(StrictModel):
                 "model_discovery": False,
                 "cost_routing": False,
                 "latency_routing": False,
+                "routing_policy": False,
+                "config_reload": False,
             },
         }[self.mode]
         for name, default in defaults.items():
@@ -192,6 +204,12 @@ class GatewayConfig(StrictModel):
             raise ValueError("cost_tracking requires usage_accounting")
         if self.features.model_discovery and not self.features.admin_api:
             raise ValueError("model_discovery requires admin_api")
+        if self.features.config_reload and not self.features.admin_api:
+            raise ValueError("config_reload requires admin_api")
+        if self.features.routing_policy and not self.routing.policies:
+            raise ValueError("routing_policy requires at least one routing policy")
+        if self.features.config_reload and self.features.exact_cache:
+            raise ValueError("config_reload cannot be combined with exact_cache")
         if self.features.cost_routing and self.features.latency_routing:
             raise ValueError("cost_routing and latency_routing are mutually exclusive")
         if self.features.exact_cache and self.cache.backend == "redis" and not self.cache.redis_url():
@@ -287,6 +305,11 @@ class GatewayConfig(StrictModel):
                 issues.append((severity, "cost routing has no models with known pricing"))
         if self.features.latency_routing and self.server.workers > 1:
             issues.append(("WARN", "latency routing observations are process-local across workers"))
+        if self.features.routing_policy and any(
+            policy.fallback == "default" and policy.residencies
+            for policy in self.routing.policies
+        ):
+            issues.append(("WARN", "a residency routing policy permits default fallback"))
         endpoint = self.telemetry.endpoint()
         if self.features.tracing and endpoint and endpoint.startswith("http://"):
             issues.append(("WARN", "OpenTelemetry exporter endpoint is not encrypted"))
@@ -336,6 +359,29 @@ class AuthConfig(StrictModel):
         return None
 
 
+class RoutingPolicyConfig(StrictModel):
+    name: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    operations: set[Literal["chat", "embeddings", "audio_speech", "image_generation"]] = Field(
+        default_factory=lambda: {"chat", "embeddings", "audio_speech", "image_generation"}
+    )
+    models: set[str] = Field(default_factory=lambda: {"*"}, max_length=256)
+    tiers: set[Literal["free", "paid"]] = Field(default_factory=lambda: {"free", "paid"})
+    providers: set[str] = Field(default_factory=set, max_length=256)
+    regions: set[str] = Field(default_factory=set, max_length=256)
+    residencies: set[str] = Field(default_factory=set, max_length=32)
+    min_quality: int = Field(default=0, ge=0, le=100)
+    fallback: Literal["deny", "default"] = "deny"
+
+    @model_validator(mode="after")
+    def non_empty_matchers(self) -> "RoutingPolicyConfig":
+        if not self.operations or not self.models or not self.tiers:
+            raise ValueError("routing policy operations, models, and tiers must not be empty")
+        for values in (self.models, self.providers, self.regions, self.residencies):
+            if any(not value or len(value) > 128 for value in values):
+                raise ValueError("routing policy values must be bounded non-empty strings")
+        return self
+
+
 class RoutingConfig(StrictModel):
     max_attempts: int = Field(default=0, ge=0)
     allow_provider_override: bool = False
@@ -345,6 +391,8 @@ class RoutingConfig(StrictModel):
     latency_cold_start_ms: float = Field(default=1000, gt=0, le=3_600_000)
     latency_min_samples: int = Field(default=3, ge=1, le=10_000)
     latency_exploration_interval: int = Field(default=20, ge=0, le=1_000_000)
+    allow_policy_override: bool = False
+    policies: list[RoutingPolicyConfig] = Field(default_factory=list, max_length=256)
     http_max_connections: int = Field(default=200, gt=0)
     http_max_keepalive_connections: int = Field(default=50, ge=0)
     http_keepalive_expiry_seconds: float = Field(default=30, gt=0)
@@ -358,6 +406,9 @@ class RoutingConfig(StrictModel):
     def valid_retry_backoff(self) -> "RoutingConfig":
         if self.retry_max_backoff_seconds < self.retry_initial_backoff_seconds:
             raise ValueError("retry_max_backoff_seconds must be at least retry_initial_backoff_seconds")
+        names = [policy.name for policy in self.policies]
+        if len(names) != len(set(names)):
+            raise ValueError("routing policy names must be unique")
         return self
 
 
@@ -581,6 +632,10 @@ class ModelDiscoveryConfig(StrictModel):
         return self
 
 
+class ConfigReloadConfig(StrictModel):
+    max_generations: int = Field(default=10, ge=1, le=100)
+
+
 class FeatureConfig(StrictModel):
     authentication: bool | None = None
     admin_api: bool | None = None
@@ -606,6 +661,8 @@ class FeatureConfig(StrictModel):
     model_discovery: bool | None = None
     cost_routing: bool | None = None
     latency_routing: bool | None = None
+    routing_policy: bool | None = None
+    config_reload: bool | None = None
 
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")

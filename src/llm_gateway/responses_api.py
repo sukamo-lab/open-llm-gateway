@@ -65,6 +65,8 @@ def to_chat_payload(payload: dict[str, Any], config: ResponsesConfig) -> dict[st
         "parallel_tool_calls": "parallel_tool_calls",
         "user": "user",
         "service_tier": "service_tier",
+        "provider": "provider",
+        "routing_policy": "routing_policy",
     }
     for source, target in mappings.items():
         if payload.get(source) is not None:

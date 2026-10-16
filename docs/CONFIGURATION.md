@@ -25,7 +25,7 @@ When `auth.enabled` is true, `/v1/*` requires a bearer token listed in the comma
 - `allow_provider_override`: enables the non-standard request field `provider`; useful for diagnostics but normally false on public deployments.
 - `http_max_connections`, `http_max_keepalive_connections`, and `http_keepalive_expiry_seconds` tune the shared upstream connection pool. Reused TLS connections minimize gateway overhead.
 - `retry_attempts` is the total number of attempts for one provider candidate; `1` disables same-provider retries and preserves immediate failover. Transient transport errors and HTTP 408/425/429/5xx responses use bounded exponential backoff and jitter. `Retry-After` is honored up to `retry_max_backoff_seconds`.
-- `request_deadline_seconds` optionally bounds all non-streaming attempts against one provider. Keep it below the consumer/load-balancer timeout. Streaming retries currently occur through provider failover only before a successful stream is established.
+- `request_deadline_seconds` optionally bounds all attempts against one provider, including establishment of a streaming response. Keep it below the consumer/load-balancer timeout. Streaming requests retry transient failures only before the first response byte; after SSE output begins, the gateway propagates an interruption instead of retrying or failing over and mixing output from multiple attempts.
 - Provider `tier` is `free` or `paid`. Free always sorts first.
 - Lower model `priority` sorts first within a tier.
 - `features.cost_routing` replaces priority-first ordering within each tier with estimated request cost. Free providers still always precede paid providers.
@@ -77,9 +77,45 @@ routing:
   latency_exploration_interval: 20  # 0 disables exploration
 ```
 
-Candidates below `latency_min_samples` use the cold-start estimate. Every configured exploration interval, the least-sampled candidate in each tier is tried first; this is counter-based and deterministic rather than random. Only successful upstream responses update EWMA observations. Chat responses expose the selected latency state under `gateway.routing.latency`, and `/admin/providers` exposes content-free observations for troubleshooting.
+Candidates below `latency_min_samples` use the cold-start estimate. Every configured exploration interval, the least-sampled candidate in each tier is tried first; counters are isolated by operation and deterministic rather than random. Only successful upstream responses update EWMA observations. Chat responses expose the selected latency state under `gateway.routing.latency`, and `/admin/providers` exposes content-free observations for troubleshooting.
 
 Observations are in-memory and process-local, reset on restart, and are not coordinated between workers or replicas. This makes the current implementation suitable for a single process and safe experimentation; shared state, percentile-aware ranking, outlier controls, and cross-replica convergence remain pending.
+
+### Declarative routing policies
+
+`features.routing_policy` enables an ordered, declarative filter after capability, circuit, credential, and paid-fallback checks and before cost or latency ranking. The first rule whose `operations` and `models` match applies. Provider `region` and `residencies` and model `quality` are operator assertions; the gateway does not independently certify them.
+
+```yaml
+features:
+  routing_policy: true
+routing:
+  allow_policy_override: false
+  policies:
+    - name: eu-production
+      operations: [chat, embeddings]
+      models: ["*"]
+      tiers: [free, paid]
+      regions: [eu-west]
+      residencies: [eu]
+      min_quality: 80
+      fallback: deny
+providers:
+  - name: eu-provider
+    region: eu-west
+    residencies: [eu]
+    models:
+      - {name: fast, upstream_model: vendor-model, quality: 90}
+```
+
+Empty provider/region/residency lists mean no constraint for that dimension. `fallback: deny` returns no route when the rule has no eligible candidate; `default` explicitly returns to the pre-policy candidate set. `routing_policy` may be supplied in chat, embeddings, speech, or image requests only when `allow_policy_override` is true. It is removed before upstream transmission. Chat responses identify the applied rule and fallback mode under `gateway.routing.policy`; no tenant or content data is exposed.
+
+Policies are local configuration shared by all tenants. Tenant-specific policy assignment, authorization, audit history, and certified residency enforcement belong to the later IAM/governance phases.
+
+### Atomic routing configuration reload
+
+`features.config_reload` adds `POST /admin/config/reload` and requires `admin_api`. The endpoint rereads the original configuration path, fully validates it, and accepts only `routing` and `providers`/models changes. Authentication, storage, feature flags, middleware, endpoint composition, and other structural changes require a process restart. A rejected file leaves the active router untouched.
+
+Each successful reload constructs a fresh upstream connection pool and router before one atomic state swap. Previous pools remain open until shutdown so in-flight requests are not interrupted. `config_reload.max_generations` bounds retained pools and forces a restart after the configured number. Exact caching is currently incompatible because a routing-only reload would otherwise require coordinated cache namespace rollover. Reloads are per process; orchestrators must call and verify each replica or perform a rolling restart.
 
 ## Responses API
 

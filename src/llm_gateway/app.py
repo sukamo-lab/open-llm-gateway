@@ -29,6 +29,24 @@ from .router import GatewayRouter, NoModelAvailable, QuotaExceeded
 logger = logging.getLogger("llm_gateway")
 
 
+def _reload_immutable_state(config) -> dict[str, Any]:
+    state = config.model_dump(mode="json")
+    state.pop("routing", None)
+    state.pop("providers", None)
+    return state
+
+
+def _provider_client(config) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        follow_redirects=True,
+        limits=httpx.Limits(
+            max_connections=config.routing.http_max_connections,
+            max_keepalive_connections=config.routing.http_max_keepalive_connections,
+            keepalive_expiry=config.routing.http_keepalive_expiry_seconds,
+        ),
+    )
+
+
 class TenantCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     requests_per_minute: int | None = Field(default=None, gt=0)
@@ -121,6 +139,10 @@ def request_with_json(request: Request, payload: dict[str, Any]) -> Request:
 
 def create_app(config_path: str = "config.yaml") -> FastAPI:
     config = load_config(config_path)
+    config_path = str(config_path)
+    reload_clients: list[httpx.AsyncClient] = []
+    reload_lock = asyncio.Lock()
+    reload_generation = 0
     quota_enabled = bool(
         config.features.provider_quotas
         or config.features.tenant_quotas
@@ -199,6 +221,10 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             )
         routing_material = {
             "paid_fallback": config.routing.paid_fallback,
+            "routing_policies": (
+                [policy.model_dump(mode="json") for policy in config.routing.policies]
+                if config.features.routing_policy else None
+            ),
             "pii_policy": (
                 {
                     "action": config.pii.action,
@@ -231,12 +257,14 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             "providers": [
                 {
                     "name": provider.name, "enabled": provider.enabled, "tier": provider.tier,
+                    "region": provider.region, "residencies": sorted(provider.residencies),
                     "base_url": provider.base_url, "path": provider.chat_completions_path,
                     "defaults": provider.request_defaults,
                     "models": [
                         {
                             "name": model.name, "upstream": model.upstream_model,
                             "priority": model.priority, "capabilities": sorted(model.capabilities),
+                            "quality": model.quality,
                             "prompt_injection_safe": model.prompt_injection_safe,
                             "overrides": model.request_overrides,
                         }
@@ -310,14 +338,12 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         )
         if removed:
             logger.info("Removed %s expired accounting records", removed)
-        limits = httpx.Limits(
-            max_connections=config.routing.http_max_connections,
-            max_keepalive_connections=config.routing.http_max_keepalive_connections,
-            keepalive_expiry=config.routing.http_keepalive_expiry_seconds,
-        )
-        async with httpx.AsyncClient(follow_redirects=True, limits=limits) as client:
+        async with _provider_client(config) as client:
             app.state.router = GatewayRouter(config, quota, client, metrics, telemetry)
+            app.state.active_config = config
             yield
+        for reload_client in reload_clients:
+            await reload_client.aclose()
         close = getattr(shared_store or quota, "close", None)
         if close:
             await close()
@@ -575,14 +601,56 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
     @app.get("/admin/config/diagnostics")
     async def config_diagnostics(request: Request) -> dict[str, object]:
         require_admin(request)
-        issues = [{"severity": severity, "message": message} for severity, message in config.diagnostics()]
+        active_config = request.app.state.active_config
+        issues = [
+            {"severity": severity, "message": message}
+            for severity, message in active_config.diagnostics()
+        ]
         return {"valid": not any(item["severity"] == "ERROR" for item in issues), "issues": issues}
+
+    if config.features.config_reload:
+        @app.post("/admin/config/reload")
+        async def reload_config(request: Request) -> dict[str, object]:
+            nonlocal reload_generation
+            require_admin(request)
+            try:
+                candidate = load_config(config_path)
+            except Exception as exc:
+                logger.warning(
+                    "Configuration reload rejected error_type=%s", type(exc).__name__
+                )
+                raise HTTPException(422, "configuration reload rejected") from exc
+            if _reload_immutable_state(candidate) != _reload_immutable_state(config):
+                raise HTTPException(
+                    409,
+                    "configuration reload supports only routing and provider/model changes",
+                )
+            async with reload_lock:
+                if reload_generation >= config.config_reload.max_generations:
+                    raise HTTPException(409, "configuration reload generation limit reached; restart required")
+                client = _provider_client(candidate)
+                try:
+                    router = GatewayRouter(candidate, quota, client, metrics, telemetry)
+                except Exception:
+                    await client.aclose()
+                    raise
+                reload_clients.append(client)
+                request.app.state.router = router
+                request.app.state.active_config = candidate
+                reload_generation += 1
+            logger.info("Configuration routing state reloaded generation=%s", reload_generation)
+            return {
+                "status": "reloaded",
+                "generation": reload_generation,
+                "providers": len(candidate.providers),
+            }
 
     @app.post("/admin/model-discovery")
     async def model_discovery(request: Request, selection: ModelDiscoveryRequest) -> dict[str, object]:
         require_admin(request)
+        active_config = request.app.state.active_config
         requested = set(selection.providers) if selection.providers is not None else None
-        known = {provider.name for provider in config.providers}
+        known = {provider.name for provider in active_config.providers}
         if requested is not None:
             if any(not name or len(name) > 120 for name in requested):
                 raise HTTPException(400, "provider names must be bounded non-empty text")
@@ -591,10 +659,10 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                 raise HTTPException(400, f"unknown provider: {unknown[0]}")
         from .model_discovery import discover_models
 
-        reports = await discover_models(config, request.app.state.router.client, requested)
+        reports = await discover_models(active_config, request.app.state.router.client, requested)
         return {
             "object": "model_discovery_report",
-            "approval_mode": config.model_discovery.approval_mode,
+            "approval_mode": active_config.model_discovery.approval_mode,
             "providers": reports,
         }
 
@@ -1185,6 +1253,8 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         }
         for name, value in upstream_headers.items():
             if name.lower().startswith(("x-ratelimit", "ratelimit")):
+                headers[name] = value
+            elif name.lower() == "x-gateway-routing-policy":
                 headers[name] = value
         return Response(
             content=content,

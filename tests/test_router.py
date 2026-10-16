@@ -1,10 +1,10 @@
 import httpx
 import pytest
 
-from llm_gateway.config import GatewayConfig
+from llm_gateway.config import GatewayConfig, RoutingPolicyConfig
 from llm_gateway.metrics import Metrics
 from llm_gateway.quota import QuotaStore
-from llm_gateway.router import GatewayRouter
+from llm_gateway.router import GatewayRouter, NoModelAvailable
 
 
 def make_config(tmp_path, providers):
@@ -24,6 +24,12 @@ def provider(name, tier, key_env, models, priority_limit=None):
     if priority_limit:
         result["limits"] = priority_limit
     return result
+
+
+class BrokenAfterFirstChunk(httpx.AsyncByteStream):
+    async def __aiter__(self):
+        yield b"data: first\n\n"
+        raise httpx.ReadError("stream interrupted")
 
 
 def test_free_models_precede_paid_and_reasoning_is_required(tmp_path, monkeypatch):
@@ -176,6 +182,83 @@ def test_latency_routing_explores_least_sampled_deterministically(tmp_path, monk
     router._observe_latency(candidates[1], "chat", 500)
     assert router.rank_by_latency(candidates, "chat")[0].model.name == "a"
     assert router.rank_by_latency(candidates, "chat")[0].model.name == "b"
+
+
+def test_latency_exploration_intervals_are_isolated_by_operation(tmp_path, monkeypatch):
+    for key in ("A", "B"):
+        monkeypatch.setenv(key, "secret")
+    config = make_config(tmp_path, [
+        provider("a", "free", "A", [{"name": "a", "upstream_model": "a", "priority": 1}]),
+        provider("b", "free", "B", [{"name": "b", "upstream_model": "b", "priority": 2}]),
+    ])
+    config.features.latency_routing = True
+    config.routing.latency_min_samples = 1
+    config.routing.latency_exploration_interval = 2
+    router = GatewayRouter(config, QuotaStore(config.database), httpx.AsyncClient())
+    candidates = router.candidates("auto", False)
+    router._observe_latency(candidates[0], "chat", 50)
+    router._observe_latency(candidates[0], "chat", 50)
+    router._observe_latency(candidates[1], "chat", 500)
+
+    assert router.rank_by_latency(candidates, "chat")[0].model.name == "a"
+    assert router.rank_by_latency(candidates, "embeddings")[0].model.name == "a"
+    assert router.rank_by_latency(candidates, "chat")[0].model.name == "b"
+
+
+def test_routing_policy_enforces_region_residency_quality_and_fallback(tmp_path, monkeypatch):
+    for key in ("EU", "US"):
+        monkeypatch.setenv(key, "secret")
+    eu = provider("eu", "free", "EU", [{
+        "name": "chat", "upstream_model": "eu-chat", "quality": 90,
+    }])
+    eu.update({"region": "eu-west", "residencies": ["eu"]})
+    us = provider("us", "free", "US", [{
+        "name": "chat", "upstream_model": "us-chat", "quality": 95,
+    }])
+    us.update({"region": "us-east", "residencies": ["us"]})
+    config = make_config(tmp_path, [us, eu])
+    config.features.routing_policy = True
+    config.routing.policies = [RoutingPolicyConfig.model_validate({
+        "name": "eu-only", "operations": ["chat"], "regions": ["eu-west"],
+        "residencies": ["eu"], "min_quality": 80,
+    })]
+    router = GatewayRouter(config, QuotaStore(config.database), httpx.AsyncClient())
+    candidates, policy = router.apply_routing_policy(
+        router.candidates("chat", False), "chat", "chat"
+    )
+    assert policy is not None and policy.name == "eu-only"
+    assert [candidate.provider.name for candidate in candidates] == ["eu"]
+
+    config.routing.policies[0] = config.routing.policies[0].model_copy(update={
+        "regions": {"missing"}, "fallback": "default",
+    })
+    candidates, _policy = router.apply_routing_policy(
+        router.candidates("chat", False), "chat", "chat"
+    )
+    assert [candidate.provider.name for candidate in candidates] == ["eu", "us"]
+
+
+def test_named_routing_policy_override_is_guarded(tmp_path, monkeypatch):
+    monkeypatch.setenv("KEY", "secret")
+    config = make_config(tmp_path, [
+        provider("p", "free", "KEY", [{"name": "chat", "upstream_model": "chat"}]),
+    ])
+    config.features.routing_policy = True
+    config.routing.policies = [RoutingPolicyConfig(name="restricted")]
+    router = GatewayRouter(config, QuotaStore(config.database), httpx.AsyncClient())
+    with pytest.raises(NoModelAvailable, match="override is disabled"):
+        router.apply_routing_policy(router.candidates("chat", False), "chat", "chat", "restricted")
+    config.routing.allow_policy_override = True
+    _candidates, policy = router.apply_routing_policy(
+        router.candidates("chat", False), "chat", "chat", "restricted"
+    )
+    assert policy is not None and policy.name == "restricted"
+    upstream = router._upstream_payload(
+        router.candidates("chat", False)[0],
+        {"model": "chat", "messages": [], "routing_policy": "restricted"},
+        False,
+    )
+    assert "routing_policy" not in upstream
 
 
 @pytest.mark.asyncio
@@ -409,6 +492,96 @@ async def test_non_transient_error_does_not_retry(tmp_path, monkeypatch):
         with pytest.raises(Exception):
             await GatewayRouter(config, quota, client).complete({"model": "chat", "messages": []})
     assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_retries_retryable_status_before_emitting_bytes(tmp_path, monkeypatch):
+    monkeypatch.setenv("FREE_KEY", "secret")
+    config = make_config(
+        tmp_path,
+        [provider("free", "free", "FREE_KEY", [{"name": "chat", "upstream_model": "free"}])],
+    )
+    config.routing.retry_attempts = 2
+    config.routing.retry_initial_backoff_seconds = 0
+    calls = 0
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(429, headers={"Retry-After": "0"}, content=b"limited")
+        return httpx.Response(200, content=b"data: success\n\n")
+
+    quota = QuotaStore(config.database)
+    await quota.initialize()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        chunks = [chunk async for chunk in GatewayRouter(config, quota, client).stream({
+            "model": "chat", "messages": [{"role": "user", "content": "hello"}],
+        })]
+
+    assert b"".join(chunks) == b"data: success\n\n"
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_stream_retries_transport_failure_before_emitting_bytes(tmp_path, monkeypatch):
+    monkeypatch.setenv("FREE_KEY", "secret")
+    config = make_config(
+        tmp_path,
+        [provider("free", "free", "FREE_KEY", [{"name": "chat", "upstream_model": "free"}])],
+    )
+    config.routing.retry_attempts = 2
+    config.routing.retry_initial_backoff_seconds = 0
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.ConnectError("connection refused", request=request)
+        return httpx.Response(200, content=b"data: recovered\n\n")
+
+    quota = QuotaStore(config.database)
+    await quota.initialize()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        chunks = [chunk async for chunk in GatewayRouter(config, quota, client).stream({
+            "model": "chat", "messages": [],
+        })]
+
+    assert b"".join(chunks) == b"data: recovered\n\n"
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_stream_never_retries_or_fails_over_after_emitting_bytes(tmp_path, monkeypatch):
+    monkeypatch.setenv("FREE_KEY", "secret")
+    monkeypatch.setenv("PAID_KEY", "secret")
+    config = make_config(tmp_path, [
+        provider("free", "free", "FREE_KEY", [{"name": "chat", "upstream_model": "free"}]),
+        provider("paid", "paid", "PAID_KEY", [{"name": "chat", "upstream_model": "paid"}]),
+    ])
+    config.routing.retry_attempts = 2
+    config.routing.retry_initial_backoff_seconds = 0
+    calls = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.host)
+        if request.url.host == "free.example":
+            return httpx.Response(200, stream=BrokenAfterFirstChunk())
+        return httpx.Response(200, content=b"data: paid\n\n")
+
+    quota = QuotaStore(config.database)
+    await quota.initialize()
+    received = []
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(httpx.ReadError):
+            async for chunk in GatewayRouter(config, quota, client).stream({
+                "model": "chat", "messages": [],
+            }):
+                received.append(chunk)
+
+    assert received == [b"data: first\n\n"]
+    assert calls == ["free.example"]
 
 
 @pytest.mark.asyncio

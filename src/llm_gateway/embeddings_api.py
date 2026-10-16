@@ -12,7 +12,7 @@ class EmbeddingsValidationError(ValueError):
 def validate_embeddings_payload(
     payload: dict[str, Any], config: EmbeddingsConfig,
 ) -> dict[str, Any]:
-    allowed = {"model", "input", "encoding_format", "dimensions", "user", "provider"}
+    allowed = {"model", "input", "encoding_format", "dimensions", "user", "provider", "routing_policy"}
     unknown = sorted(set(payload) - allowed)
     if unknown:
         raise EmbeddingsValidationError(f"unsupported embeddings field: {unknown[0]}")
@@ -34,11 +34,16 @@ def validate_embeddings_payload(
     provider = payload.get("provider")
     if provider is not None and (not isinstance(provider, str) or not provider):
         raise EmbeddingsValidationError("provider must be a non-empty string")
+    routing_policy = payload.get("routing_policy")
+    if routing_policy is not None and (
+        not isinstance(routing_policy, str) or not routing_policy or len(routing_policy) > 64
+    ):
+        raise EmbeddingsValidationError("routing_policy must be a bounded non-empty string")
     model = payload.get("model", "auto")
     if not isinstance(model, str) or not model:
         raise EmbeddingsValidationError("model must be a non-empty string")
     result = {"model": model, "input": input_value, "encoding_format": encoding}
-    for field in ("dimensions", "user", "provider"):
+    for field in ("dimensions", "user", "provider", "routing_policy"):
         if payload.get(field) is not None:
             result[field] = payload[field]
     return result

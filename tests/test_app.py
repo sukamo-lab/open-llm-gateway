@@ -3,6 +3,48 @@ from fastapi.testclient import TestClient
 from llm_gateway.app import create_app
 
 
+def test_config_reload_is_atomic_and_feature_flagged(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROVIDER_KEY", "secret")
+    disabled = tmp_path / "disabled-reload.yaml"
+    disabled.write_text(
+        "providers:\n  - name: p\n    base_url: https://old.example/v1\n"
+        "    api_key_env: PROVIDER_KEY\n    models:\n"
+        "      - {name: fast, upstream_model: model}\n",
+        encoding="utf-8",
+    )
+    with TestClient(create_app(str(disabled)), raise_server_exceptions=False) as client:
+        assert client.post("/admin/config/reload").status_code == 404
+
+    config = tmp_path / "reload.yaml"
+    initial = (
+        "features:\n  admin_api: true\n  config_reload: true\n"
+        "providers:\n  - name: p\n    base_url: https://old.example/v1\n"
+        "    api_key_env: PROVIDER_KEY\n    models:\n"
+        "      - {name: fast, upstream_model: model}\n"
+    )
+    config.write_text(initial, encoding="utf-8")
+    with TestClient(create_app(str(config)), raise_server_exceptions=False) as client:
+        config.write_text(initial.replace("old.example", "new.example"), encoding="utf-8")
+        response = client.post("/admin/config/reload")
+        assert response.status_code == 200
+        assert response.json() == {"status": "reloaded", "generation": 1, "providers": 1}
+        assert client.app.state.router.config.providers[0].base_url == "https://new.example/v1"
+        active_router = client.app.state.router
+
+        config.write_text(
+            initial.replace("features:\n", "server:\n  port: 9000\nfeatures:\n"),
+            encoding="utf-8",
+        )
+        structural = client.post("/admin/config/reload")
+        assert structural.status_code == 409
+        assert client.app.state.router is active_router
+
+        config.write_text("providers: [", encoding="utf-8")
+        rejected = client.post("/admin/config/reload")
+        assert rejected.status_code == 422
+        assert client.app.state.router is active_router
+
+
 def test_http_errors_and_body_limit_are_openai_shaped(tmp_path, monkeypatch):
     monkeypatch.setenv("PROVIDER_KEY", "secret")
     config = tmp_path / "config.yaml"
