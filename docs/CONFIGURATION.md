@@ -77,9 +77,45 @@ routing:
   latency_exploration_interval: 20  # 0 disables exploration
 ```
 
-Candidates below `latency_min_samples` use the cold-start estimate. Every configured exploration interval, the least-sampled candidate in each tier is tried first; this is counter-based and deterministic rather than random. Only successful upstream responses update EWMA observations. Chat responses expose the selected latency state under `gateway.routing.latency`, and `/admin/providers` exposes content-free observations for troubleshooting.
+Candidates below `latency_min_samples` use the cold-start estimate. Every configured exploration interval, the least-sampled candidate in each tier is tried first; counters are isolated by operation and deterministic rather than random. Only successful upstream responses update EWMA observations. Chat responses expose the selected latency state under `gateway.routing.latency`, and `/admin/providers` exposes content-free observations for troubleshooting.
 
 Observations are in-memory and process-local, reset on restart, and are not coordinated between workers or replicas. This makes the current implementation suitable for a single process and safe experimentation; shared state, percentile-aware ranking, outlier controls, and cross-replica convergence remain pending.
+
+### Declarative routing policies
+
+`features.routing_policy` enables an ordered, declarative filter after capability, circuit, credential, and paid-fallback checks and before cost or latency ranking. The first rule whose `operations` and `models` match applies. Provider `region` and `residencies` and model `quality` are operator assertions; the gateway does not independently certify them.
+
+```yaml
+features:
+  routing_policy: true
+routing:
+  allow_policy_override: false
+  policies:
+    - name: eu-production
+      operations: [chat, embeddings]
+      models: ["*"]
+      tiers: [free, paid]
+      regions: [eu-west]
+      residencies: [eu]
+      min_quality: 80
+      fallback: deny
+providers:
+  - name: eu-provider
+    region: eu-west
+    residencies: [eu]
+    models:
+      - {name: fast, upstream_model: vendor-model, quality: 90}
+```
+
+Empty provider/region/residency lists mean no constraint for that dimension. `fallback: deny` returns no route when the rule has no eligible candidate; `default` explicitly returns to the pre-policy candidate set. `routing_policy` may be supplied in chat, embeddings, speech, or image requests only when `allow_policy_override` is true. It is removed before upstream transmission. Chat responses identify the applied rule and fallback mode under `gateway.routing.policy`; no tenant or content data is exposed.
+
+Policies are local configuration shared by all tenants. Tenant-specific policy assignment, authorization, audit history, and certified residency enforcement belong to the later IAM/governance phases.
+
+### Atomic routing configuration reload
+
+`features.config_reload` adds `POST /admin/config/reload` and requires `admin_api`. The endpoint rereads the original configuration path, fully validates it, and accepts only `routing` and `providers`/models changes. Authentication, storage, feature flags, middleware, endpoint composition, and other structural changes require a process restart. A rejected file leaves the active router untouched.
+
+Each successful reload constructs a fresh upstream connection pool and router before one atomic state swap. Previous pools remain open until shutdown so in-flight requests are not interrupted. `config_reload.max_generations` bounds retained pools and forces a restart after the configured number. Exact caching is currently incompatible because a routing-only reload would otherwise require coordinated cache namespace rollover. Reloads are per process; orchestrators must call and verify each replica or perform a rolling restart.
 
 ## Responses API
 

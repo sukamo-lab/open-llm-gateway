@@ -28,6 +28,8 @@ features:
   model_discovery: false
   cost_routing: false
   latency_routing: false
+  routing_policy: false
+  config_reload: false
 
 server:
   host: 0.0.0.0
@@ -52,6 +54,9 @@ routing:
   latency_cold_start_ms: 1000
   latency_min_samples: 3
   latency_exploration_interval: 20
+  allow_policy_override: false
+  # Ordered rules; the first operation/model match applies.
+  policies: []
   http_max_connections: 200
   http_max_keepalive_connections: 50
   http_keepalive_expiry_seconds: 30
@@ -177,11 +182,17 @@ model_discovery:
   max_concurrency: 8
   approval_mode: report_only
 
+config_reload:
+  # Reloaded HTTP pools remain alive until shutdown so active requests are not interrupted.
+  max_generations: 10
+
 providers:
   - name: google-free
     base_url: https://generativelanguage.googleapis.com/v1beta/openai
     api_key_env: GOOGLE_API_KEY
     tier: free
+    region: us-central
+    residencies: [us]
     max_concurrency: 5
     failure_threshold: 3
     cooldown_seconds: 60
@@ -192,6 +203,7 @@ providers:
       - name: fast
         upstream_model: gemini-2.5-flash
         priority: 10
+        quality: 70
         capabilities: [chat, vision, tools, json]
       - name: reasoning
         upstream_model: gemini-2.5-flash
@@ -203,6 +215,8 @@ providers:
     base_url: https://api.openai.com/v1
     api_key_env: OPENAI_API_KEY
     tier: paid
+    region: us-east
+    residencies: [us]
     max_concurrency: 20
     limits:
       # Example rolling account safety budget; adjust to your organization.
@@ -211,6 +225,7 @@ providers:
       - name: fast
         upstream_model: gpt-4.1-mini
         priority: 10
+        quality: 80
         capabilities: [chat, vision, tools, json]
         input_cost_per_million: 0.40
         output_cost_per_million: 1.60

@@ -31,6 +31,8 @@ features:
   model_discovery: false
   cost_routing: false
   latency_routing: false
+  routing_policy: false
+  config_reload: false
 ```
 
 Single-user defaults require only a provider key, bind to localhost, do not initialize tenant/key infrastructure, and select the no-database `NullQuotaStore` hot path. Provider quotas or accounting can be enabled independently when desired.
@@ -70,6 +72,8 @@ features:
   model_discovery: false
   cost_routing: false
   latency_routing: false
+  routing_policy: false
+  config_reload: false
 ```
 
 Multi-user defaults enable tenant identities, expiring consumer keys, tenant/provider limits, accounting, costs, metrics, and circuit breaking. PostgreSQL is recommended for multiple replicas.
@@ -104,9 +108,11 @@ Disabled features are not merely hidden:
 - `model_discovery: false` removes `/admin/model-discovery` and performs no catalog requests. Discovery also requires `admin_api`.
 - `cost_routing: false` retains the original tier/priority ordering and performs no request-cost ranking.
 - `latency_routing: false` avoids EWMA observations, selection counters, and latency-based ranking.
+- `routing_policy: false` avoids policy matching and preserves the existing candidate order.
+- `config_reload: false` removes `/admin/config/reload` and allocates no reload pools or generations.
 - `authentication: false` removes consumer authentication checks, but is accepted only on a localhost bind.
 
-Invalid dependency combinations fail configuration validation: managed keys require authentication and the admin API; tenant quotas require managed keys; cost tracking requires accounting.
+Invalid dependency combinations fail configuration validation: managed keys require authentication and the admin API; tenant quotas require managed keys; cost tracking requires accounting; configuration reload requires the admin API and cannot be combined with exact caching in its current routing-only form.
 
 ## Latency
 

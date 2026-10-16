@@ -33,6 +33,10 @@ For least-cost routing, keep pricing metadata under change control and alert on 
 
 For latency routing, begin with a conservative cold-start estimate and exploration interval, then inspect `/admin/providers` observations and existing provider-duration histograms. EWMA state resets on process restart and differs across workers/replicas; use one worker when consistent selection is required. Setting exploration to `0` disables sampling but can leave a temporarily slow candidate permanently disadvantaged.
 
+For declarative routing policies, treat region, residency, and quality metadata as controlled operator assertions. Prefer `fallback: deny` for residency-sensitive traffic; `default` explicitly relaxes the rule when no constrained candidate is available. Keep client policy override disabled unless callers are separately authorized to choose among configured policies.
+
+When configuration reload is enabled, validate candidate files with `llm-gateway --check` before calling `POST /admin/config/reload`. A successful response applies only routing and provider/model changes to that process. Rejected files preserve the last-known-good router. Reload every replica and compare the returned generation, or use a rolling restart. Restart before `max_generations` is exhausted and whenever changing features, authentication, storage, middleware, or exact-cache configuration.
+
 `llm-gateway --init --init-mode single` creates the no-database minimal profile. `--init-mode multi` creates secured consumer/admin credentials and enables the managed feature set.
 
 `llm-gateway --migration-status --output json` reports component schema versions without changing them. `llm-gateway --migrate` applies pending migrations and is suitable for a deployment pre-start job. See [Database migrations](DATABASE_MIGRATIONS.md).

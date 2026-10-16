@@ -17,6 +17,8 @@ It has two explicit profiles: a minimal single-user mode and a fully managed mul
 - Strict free-before-paid ordering with optional prohibition of paid fallback.
 - Opt-in least-cost ordering within free/paid tiers using versioned price metadata.
 - Opt-in EWMA latency routing with cold-start and deterministic exploration controls.
+- Opt-in declarative tier/provider/region/residency/quality routing policies.
+- Atomic administrator-triggered routing configuration reload with last-known-good rollback.
 - Persistent atomic rolling quotas for requests and tokens.
 - Automatic failover plus per-provider circuit breakers and concurrency limits.
 - Tenant-scoped persistent idempotency keys for safe non-streaming request replay.

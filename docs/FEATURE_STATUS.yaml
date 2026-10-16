@@ -1,6 +1,6 @@
 schema_version: 1
 product_version: 0.5.0
-last_updated: 2026-10-14
+last_updated: 2026-10-16
 status_values: [implemented, partial, planned, deferred]
 
 # This is the canonical product capability ledger. Never store credentials,
@@ -36,8 +36,9 @@ features:
       - src/llm_gateway/config.py
       - tests/test_responses_api.py
       - tests/test_app.py
+      - tests/test_openai_sdk.py
       - docs/CONFIGURATION.md
-    notes: A feature-flagged non-streaming adapter supports text, message history, images by URL, reasoning effort, JSON formats, function tools/calls, usage, incomplete responses, and gateway metadata through the existing governed chat pipeline; streaming, hosted storage, background mode, file inputs, conversations, previous-response chaining, provider-native Responses passthrough, SDK compatibility CI, and live provider verification remain pending.
+    notes: A feature-flagged non-streaming adapter supports text, message history, images by URL, reasoning effort, JSON formats, function tools/calls, usage, incomplete responses, gateway metadata, and deterministic OpenAI Python SDK 1.x/2.x CI coverage through the existing governed chat pipeline; streaming, hosted storage, background mode, file inputs, conversations, previous-response chaining, provider-native Responses passthrough, full CI execution, and live provider verification remain pending.
   - id: API-EMBED-001
     pillar: unified_api
     name: Embeddings API
@@ -49,8 +50,9 @@ features:
       - src/llm_gateway/app.py
       - tests/test_embeddings_api.py
       - tests/test_router.py
+      - tests/test_openai_sdk.py
       - docs/CONFIGURATION.md
-    notes: A feature-flagged OpenAI-compatible endpoint supports bounded text batches and token arrays, float/base64 encodings, dimensions, capability-aware free-first routing, quotas and input-cost accounting, concurrency, retries, failover, circuit state, tracing, metrics, and input governance; full CI, live provider compatibility, endpoint-specific idempotency/cache behavior, SDK compatibility coverage, and latency benchmarks remain pending.
+    notes: A feature-flagged OpenAI-compatible endpoint supports bounded text batches and token arrays, float/base64 encodings, dimensions, capability-aware free-first routing, quotas and input-cost accounting, concurrency, retries, failover, circuit state, tracing, metrics, input governance, and deterministic OpenAI Python SDK 1.x/2.x CI coverage; full CI execution, live provider compatibility, endpoint-specific idempotency/cache behavior, and sustained latency benchmarks remain pending.
   - id: API-MOD-001
     pillar: unified_api
     name: Moderation API
@@ -62,8 +64,9 @@ features:
       - src/llm_gateway/config.py
       - tests/test_moderations_api.py
       - tests/test_app.py
+      - tests/test_openai_sdk.py
       - docs/CONFIGURATION.md
-    notes: A feature-flagged OpenAI-compatible text moderation endpoint uses the bounded deterministic local engine with batched classification, accepted model aliases, content-free metrics, and explicit rule-score semantics; image moderation, provider-native adapters, calibrated probabilistic scores, full CI, SDK compatibility, latency benchmarks, and governed corpus validation remain pending.
+    notes: A feature-flagged OpenAI-compatible text moderation endpoint uses the bounded deterministic local engine with batched classification, accepted model aliases, content-free metrics, explicit rule-score semantics, and deterministic OpenAI Python SDK 1.x/2.x CI coverage; image moderation, provider-native adapters, calibrated probabilistic scores, full CI execution, sustained latency benchmarks, and governed corpus validation remain pending.
   - id: API-AUDIO-001
     pillar: unified_api
     name: Audio APIs
@@ -76,8 +79,9 @@ features:
       - tests/test_audio_api.py
       - tests/test_router.py
       - tests/test_app.py
+      - tests/test_openai_sdk.py
       - docs/CONFIGURATION.md
-    notes: A feature-flagged OpenAI-compatible text-to-speech endpoint supports bounded input and response sizes, common output formats, capability-aware free-first routing, quotas, concurrency, retries, failover, circuits, tracing, metrics, and binary responses; transcription, translation, streaming audio, input governance, provider compatibility CI, character/audio billing, and latency benchmarks remain pending.
+    notes: A feature-flagged OpenAI-compatible text-to-speech endpoint supports bounded input and response sizes, common output formats, capability-aware free-first routing, quotas, concurrency, retries, failover, circuits, tracing, metrics, binary responses, and deterministic OpenAI Python SDK 1.x/2.x CI coverage; transcription, translation, streaming audio, input governance, live provider compatibility, character/audio billing, full CI execution, and sustained latency benchmarks remain pending.
   - id: API-IMAGE-001
     pillar: unified_api
     name: Image generation API
@@ -90,8 +94,9 @@ features:
       - tests/test_images_api.py
       - tests/test_router.py
       - tests/test_app.py
+      - tests/test_openai_sdk.py
       - docs/CONFIGURATION.md
-    notes: A feature-flagged OpenAI-compatible generations endpoint supports bounded prompts/counts/response sizes, URL or base64 results, capability-aware free-first routing, quotas, concurrency, retries, failover, circuits, tracing, metrics, and strict response validation; edits, variations, direct binary delivery, prompt governance, provider compatibility CI, image-specific billing, and latency benchmarks remain pending.
+    notes: A feature-flagged OpenAI-compatible generations endpoint supports bounded prompts/counts/response sizes, URL or base64 results, capability-aware free-first routing, quotas, concurrency, retries, failover, circuits, tracing, metrics, strict response validation, and deterministic OpenAI Python SDK 1.x/2.x CI coverage; edits, variations, direct binary delivery, prompt governance, live provider compatibility, image-specific billing, full CI execution, and sustained latency benchmarks remain pending.
   - id: API-IDEMP-001
     pillar: unified_api
     name: Idempotency keys
@@ -150,15 +155,31 @@ features:
     name: Latency-aware routing
     status: partial
     target: v0.8
+    verified: 2026-10-16
     depends_on: [OBS-SLA-001]
     evidence:
       - src/llm_gateway/router.py
       - src/llm_gateway/config.py
       - tests/test_router.py
       - tests/test_config.py
+      - config.example.yaml
       - docs/CONFIGURATION.md
-    notes: Opt-in per-operation EWMA ranking preserves free-before-paid tiers, supports bounded cold-start and deterministic least-sampled exploration controls, records only successful responses, and exposes content-free decision state; shared cross-replica observations, percentiles, outlier handling, persistence, full CI, and benchmarks remain pending.
-  - {id: ROUTE-POLICY-001, pillar: routing, name: Declarative quality/region/residency routing, status: planned, target: v0.8}
+    notes: Opt-in per-operation EWMA ranking preserves free-before-paid tiers, supports bounded cold-start and independently counted deterministic least-sampled exploration controls, records only successful responses, and exposes content-free decision state; shared cross-replica observations, percentiles, outlier handling, persistence, full CI, and benchmarks remain pending.
+  - id: ROUTE-POLICY-001
+    pillar: routing
+    name: Declarative quality/region/residency routing
+    status: partial
+    target: v0.8
+    verified: 2026-10-16
+    depends_on: [ROUTE-TIER-001]
+    evidence:
+      - src/llm_gateway/config.py
+      - src/llm_gateway/router.py
+      - tests/test_config.py
+      - tests/test_router.py
+      - config.example.yaml
+      - docs/CONFIGURATION.md
+    notes: Opt-in ordered policies constrain operation/model candidates by tier, provider, region, residency, and minimum operator-asserted quality with explicit deny/default fallback and guarded named overrides; tenant policy assignment, authorization, audit history, certified residency metadata, full CI, and sustained benchmarks remain pending.
 
   - id: RES-CB-001
     pillar: resilience
@@ -395,7 +416,21 @@ features:
       - docs/COMPATIBILITY.md
       - docs/RELEASING.md
     notes: Metadata gates, double-build comparison, checksums, provenance, keyless signing, and compatibility policy are implemented; status remains partial until a tagged release workflow completes and its artifacts are independently verified.
-  - {id: CFG-RELOAD-001, pillar: dx_deployment, name: Atomic validated hot reload, status: planned, target: v0.8}
+  - id: CFG-RELOAD-001
+    pillar: dx_deployment
+    name: Atomic validated hot reload
+    status: partial
+    target: v0.8
+    verified: 2026-10-16
+    depends_on: [DX-TEST-001]
+    evidence:
+      - src/llm_gateway/app.py
+      - src/llm_gateway/config.py
+      - tests/test_app.py
+      - tests/test_config.py
+      - config.example.yaml
+      - docs/OPERATIONS.md
+    notes: An opt-in administrator endpoint validates and atomically swaps routing/provider/model state while preserving the last-known-good router on failure and retaining bounded old pools for in-flight requests; structural feature/storage/auth changes, exact-cache coexistence, cross-replica coordination, file watching, full CI, and load verification remain pending.
   - {id: JOB-ASYNC-001, pillar: dx_deployment, name: Durable asynchronous jobs and signed webhooks, status: planned, target: v1.0}
   - {id: DEPLOY-HELM-001, pillar: dx_deployment, name: Hardened Kubernetes Helm chart, status: planned, target: v1.0}
   - {id: OPS-DR-001, pillar: dx_deployment, name: Backup restore and disaster-recovery drills, status: planned, target: v1.0}

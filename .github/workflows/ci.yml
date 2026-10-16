@@ -50,6 +50,23 @@ jobs:
       - run: llm-gateway --help
       - run: llm-gateway-admin --help
 
+  openai-sdk:
+    name: OpenAI SDK (${{ matrix.openai }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        openai: ["openai>=1.75,<2", "openai>=2,<3"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev]" "${{ matrix.openai }}"
+      - run: python -m pytest tests/test_openai_sdk.py -q
+
   postgres:
     name: PostgreSQL integration
     runs-on: ubuntu-latest

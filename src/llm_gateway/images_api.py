@@ -14,6 +14,7 @@ class ImagesValidationError(ValueError):
 def validate_image_payload(payload: dict[str, Any], config: ImagesConfig) -> dict[str, Any]:
     supported = {
         "model", "prompt", "n", "quality", "response_format", "size", "style", "user", "provider",
+        "routing_policy",
     }
     unknown = sorted(set(payload) - supported)
     if unknown:
@@ -36,9 +37,11 @@ def validate_image_payload(payload: dict[str, Any], config: ImagesConfig) -> dic
     if response_format not in config.response_formats:
         raise ImagesValidationError("response_format is not enabled")
     result["response_format"] = response_format
-    for field in ("quality", "size", "style", "user", "provider"):
+    for field in ("quality", "size", "style", "user", "provider", "routing_policy"):
         if field in result and (not isinstance(result[field], str) or not result[field]):
             raise ImagesValidationError(f"{field} must be non-empty text")
+    if len(result.get("routing_policy", "")) > 64:
+        raise ImagesValidationError("routing_policy must be at most 64 characters")
     return result
 
 

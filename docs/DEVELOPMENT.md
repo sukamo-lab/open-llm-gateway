@@ -21,6 +21,14 @@ python -m compileall -q src scripts tests
 python -m build
 ```
 
+OpenAI Python SDK compatibility is exercised separately against the latest supported 1.x and 2.x lines:
+
+```powershell
+python -m pytest tests/test_openai_sdk.py -q
+```
+
+The CI matrix installs `openai>=1.75,<2` and `openai>=2,<3` independently and covers models, chat completions, Responses, embeddings, moderations, speech, and image generation through deterministic in-process provider fakes.
+
 These commands do not require provider credentials and must not call live LLM APIs.
 
 Release metadata is also checked in CI:

@@ -14,7 +14,7 @@ from typing import Any, AsyncIterator
 
 import httpx
 
-from .config import GatewayConfig, ModelConfig, ProviderConfig
+from .config import GatewayConfig, ModelConfig, ProviderConfig, RoutingPolicyConfig
 from .quota import QuotaStore, Reservation
 from .metrics import Metrics
 
@@ -55,7 +55,7 @@ class GatewayRouter:
         self._open_until: dict[str, float] = {}
         self._latency_ewma_ms: dict[tuple[str, str, str], float] = {}
         self._latency_samples: dict[tuple[str, str, str], int] = {}
-        self._latency_selection_count = 0
+        self._latency_selection_counts: dict[str, int] = {}
         self._semaphores = {
             provider.name: asyncio.Semaphore(provider.max_concurrency)
             for provider in config.providers
@@ -155,6 +155,48 @@ class GatewayRouter:
             key=lambda item: (item.provider.tier == "paid", item.model.priority, item.provider.name),
         )
 
+    def apply_routing_policy(
+        self, candidates: list[Candidate], requested_model: str, operation: str,
+        requested_policy: str | None = None,
+    ) -> tuple[list[Candidate], RoutingPolicyConfig | None]:
+        if requested_policy is not None and (
+            not isinstance(requested_policy, str)
+            or not requested_policy
+            or len(requested_policy) > 64
+        ):
+            raise NoModelAvailable("invalid routing policy override")
+        if not self.config.features.routing_policy:
+            if requested_policy is not None:
+                raise NoModelAvailable("routing policy override is disabled")
+            return candidates, None
+        policies = self.config.routing.policies
+        policy = None
+        if requested_policy is not None:
+            if not self.config.routing.allow_policy_override:
+                raise NoModelAvailable("routing policy override is disabled")
+            policy = next((item for item in policies if item.name == requested_policy), None)
+            if policy is None:
+                raise NoModelAvailable("unknown routing policy")
+        else:
+            policy = next((
+                item for item in policies
+                if operation in item.operations
+                and ("*" in item.models or requested_model in item.models)
+            ), None)
+        if policy is None:
+            return candidates, None
+        filtered = [
+            candidate for candidate in candidates
+            if candidate.provider.tier in policy.tiers
+            and (not policy.providers or candidate.provider.name in policy.providers)
+            and (not policy.regions or candidate.provider.region in policy.regions)
+            and policy.residencies.issubset(candidate.provider.residencies)
+            and candidate.model.quality >= policy.min_quality
+        ]
+        if not filtered and policy.fallback == "default":
+            return candidates, policy
+        return filtered, policy
+
     @staticmethod
     def estimated_cost(candidate: Candidate, input_tokens: int, output_tokens: int) -> float | None:
         model = candidate.model
@@ -225,9 +267,10 @@ class GatewayRouter:
     def rank_by_latency(self, candidates: list[Candidate], operation: str) -> list[Candidate]:
         if not self.config.features.latency_routing:
             return candidates
-        self._latency_selection_count += 1
+        selection_count = self._latency_selection_counts.get(operation, 0) + 1
+        self._latency_selection_counts[operation] = selection_count
         interval = self.config.routing.latency_exploration_interval
-        explore = bool(interval and self._latency_selection_count % interval == 0)
+        explore = bool(interval and selection_count % interval == 0)
 
         def key(candidate: Candidate) -> tuple[Any, ...]:
             latency_key = self._latency_key(candidate, operation)
@@ -319,6 +362,9 @@ class GatewayRouter:
             raise NoModelAvailable("provider override is disabled")
         candidates = self.candidates(
             requested_model, False, requested_provider, {"embeddings"}
+        )
+        candidates, routing_policy = self.apply_routing_policy(
+            candidates, requested_model, "embeddings", payload.get("routing_policy")
         )
         estimate = self.estimate_embedding_tokens(payload.get("input"))
         candidates = self.rank_by_cost(candidates, estimate, 0)
@@ -477,6 +523,10 @@ class GatewayRouter:
                     key: value for key, value in response.headers.items()
                     if key.lower().startswith(("x-ratelimit", "ratelimit"))
                 },
+                **(
+                    {"routing_policy": routing_policy.name}
+                    if routing_policy is not None else {}
+                ),
             }
             return body, candidate.provider.name, candidate.model.upstream_model
         if errors and all("quota exhausted" in error for error in errors):
@@ -493,6 +543,9 @@ class GatewayRouter:
             raise NoModelAvailable("provider override is disabled")
         candidates = self.candidates(
             requested_model, False, requested_provider, {"audio_speech"}
+        )
+        candidates, routing_policy = self.apply_routing_policy(
+            candidates, requested_model, "audio_speech", payload.get("routing_policy")
         )
         estimate = max(1, len(str(payload.get("input", ""))) // 3)
         candidates = self.rank_by_cost(candidates, estimate, 0)
@@ -539,6 +592,8 @@ class GatewayRouter:
             await self.quota.reconcile(reservation, estimate, True, estimate, 0)
             self._observe_valid_response(candidate, "audio_speech", response)
             await self._succeeded(candidate)
+            if routing_policy is not None:
+                response.headers["X-Gateway-Routing-Policy"] = routing_policy.name
             return response.content, candidate.provider.name, candidate.model.upstream_model, response.headers
         if errors and all("quota exhausted" in error for error in errors):
             raise QuotaExceeded("; ".join(errors))
@@ -556,6 +611,9 @@ class GatewayRouter:
             raise NoModelAvailable("provider override is disabled")
         candidates = self.candidates(
             requested_model, False, requested_provider, {"image_generation"}
+        )
+        candidates, routing_policy = self.apply_routing_policy(
+            candidates, requested_model, "image_generation", payload.get("routing_policy")
         )
         estimate = max(1, len(str(payload.get("prompt", ""))) // 3)
         candidates = self.rank_by_cost(candidates, estimate, 0)
@@ -614,6 +672,10 @@ class GatewayRouter:
                     key: value for key, value in response.headers.items()
                     if key.lower().startswith(("x-ratelimit", "ratelimit"))
                 },
+                **(
+                    {"routing_policy": routing_policy.name}
+                    if routing_policy is not None else {}
+                ),
             }
             return body, candidate.provider.name, candidate.model.upstream_model
         if errors and all("quota exhausted" in error for error in errors):
@@ -644,6 +706,9 @@ class GatewayRouter:
             requested_model, self.wants_reasoning(payload), requested_provider,
             self.required_capabilities(payload),
             require_injection_safe,
+        )
+        candidates, routing_policy = self.apply_routing_policy(
+            candidates, requested_model, "chat", payload.get("routing_policy")
         )
         candidates = self.rank_by_cost(candidates, estimated_input, estimated_output)
         candidates = self.rank_by_latency(candidates, "chat")
@@ -751,6 +816,15 @@ class GatewayRouter:
                     ),
                     "pricing_version": candidate.model.pricing_version,
                     **(
+                        {
+                            "policy": {
+                                "name": routing_policy.name,
+                                "fallback": routing_policy.fallback,
+                            }
+                        }
+                        if routing_policy is not None else {}
+                    ),
+                    **(
                         {"latency": self.latency_state(candidate, "chat")}
                         if self.config.features.latency_routing else {}
                     ),
@@ -780,6 +854,9 @@ class GatewayRouter:
             requested_model, self.wants_reasoning(payload), requested_provider,
             self.required_capabilities(payload),
             require_injection_safe,
+        )
+        candidates, _routing_policy = self.apply_routing_policy(
+            candidates, requested_model, "chat", payload.get("routing_policy")
         )
         candidates = self.rank_by_cost(candidates, estimated_input, estimated_output)
         candidates = self.rank_by_latency(candidates, "chat")
@@ -1050,6 +1127,7 @@ class GatewayRouter:
         result["stream"] = stream
         result.pop("reasoning", None)
         result.pop("provider", None)
+        result.pop("routing_policy", None)
         for key in tuple(result):
             if key.startswith("_gateway_"):
                 result.pop(key, None)
@@ -1064,6 +1142,7 @@ class GatewayRouter:
             "model": candidate.model.upstream_model,
         }
         result.pop("provider", None)
+        result.pop("routing_policy", None)
         for key in tuple(result):
             if key.startswith("_gateway_"):
                 result.pop(key, None)
@@ -1083,6 +1162,7 @@ class GatewayRouter:
                 "model": candidate.model.upstream_model,
             }
             result.pop("provider", None)
+            result.pop("routing_policy", None)
             for key in tuple(result):
                 if key.startswith("_gateway_"):
                     result.pop(key, None)
@@ -1095,6 +1175,7 @@ class GatewayRouter:
                 "model": candidate.model.upstream_model,
             }
             result.pop("provider", None)
+            result.pop("routing_policy", None)
             for key in tuple(result):
                 if key.startswith("_gateway_"):
                     result.pop(key, None)
