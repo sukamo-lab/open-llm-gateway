@@ -42,7 +42,10 @@ def test_chat_exact_cache_hit_and_client_bypass(tmp_path, monkeypatch):
     )
     calls = 0
 
-    async def complete(_router, _payload, _consumer_id=None, _consumer_limits=()):
+    async def complete(
+        _router, _payload, _consumer_id=None, _consumer_limits=(),
+        _require_injection_safe=False,
+    ):
         nonlocal calls
         calls += 1
         return {

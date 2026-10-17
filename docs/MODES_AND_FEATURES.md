@@ -10,6 +10,12 @@ features:
   authentication: false
   admin_api: false
   managed_keys: false
+  identity_hierarchy: false
+  rbac: false
+  oidc: false
+  audit_ledger: false
+  envelope_encryption: false
+  residency_enforcement: false
   tenant_quotas: false
   provider_quotas: false
   usage_accounting: false
@@ -51,6 +57,12 @@ features:
   authentication: true
   admin_api: true
   managed_keys: true
+  identity_hierarchy: false
+  rbac: false
+  oidc: false
+  audit_ledger: false
+  envelope_encryption: false
+  residency_enforcement: false
   tenant_quotas: true
   provider_quotas: true
   usage_accounting: true
@@ -88,6 +100,12 @@ Disabled features are not merely hidden:
 
 - `admin_api: false` removes every `/admin/*` route.
 - `managed_keys: false` avoids identity-store initialization and removes tenant/key routes.
+- `identity_hierarchy: false` removes organization/project/principal routes and creates no hierarchy tables unless another identity feature initializes the identity store. It is opt-in in both modes.
+- `rbac: false` preserves existing tenant-key behavior. When enabled, unbound and bootstrap keys cannot invoke model APIs; principal role permissions are intersected with the key permission ceiling on authentication.
+- `oidc: false` imports no JWT/cryptography package, performs no discovery, and starts no identity-provider network client. When enabled it fails closed and requires RBAC.
+- `audit_ledger: false` initializes no audit schema, hashing, export client, or audit endpoints. When enabled, security administration emits content-safe append-only events.
+- `envelope_encryption: false` imports no cryptographic implementation and preserves existing persistence behavior. When enabled, persisted cache and idempotency responses use record-bound authenticated envelopes.
+- `residency_enforcement: false` preserves ordinary routing-policy selection. When enabled, every covered request is pinned to the configured deny-fallback residency policy and overrides cannot bypass it.
 - `metrics: false` removes `/metrics` and uses a no-op metrics object.
 - disabling `provider_quotas`, `tenant_quotas`, and `usage_accounting` selects a no-I/O quota implementation.
 - `tenant_quotas: false` removes tenant-limit checks from the request path.
@@ -112,7 +130,7 @@ Disabled features are not merely hidden:
 - `config_reload: false` removes `/admin/config/reload` and allocates no reload pools or generations.
 - `authentication: false` removes consumer authentication checks, but is accepted only on a localhost bind.
 
-Invalid dependency combinations fail configuration validation: managed keys require authentication and the admin API; tenant quotas require managed keys; cost tracking requires accounting; configuration reload requires the admin API and cannot be combined with exact caching in its current routing-only form.
+Invalid dependency combinations fail configuration validation: managed keys require authentication and the admin API; identity hierarchy requires authentication, the admin API, and managed keys; RBAC requires identity hierarchy; tenant quotas require managed keys; cost tracking requires accounting; configuration reload requires the admin API and cannot be combined with exact caching in its current routing-only form.
 
 ## Latency
 

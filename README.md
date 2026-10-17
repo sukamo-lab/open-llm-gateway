@@ -25,6 +25,7 @@ It has two explicit profiles: a minimal single-user mode and a fully managed mul
 - Opt-in tenant-isolated exact response caching with memory, database, or Redis backends.
 - Client and administrator bearer authentication with environment-based secrets.
 - Multi-tenant consumer-key issuance, revocation, per-tenant quotas, and spend limits.
+- Opt-in organization/project/user/service-account hierarchy for enterprise authorization.
 - Provider/model SLA histograms, cache/retry/circuit metrics, and ready-to-import Prometheus alerts and Grafana dashboard.
 - Opt-in OpenTelemetry tracing with W3C propagation, OTLP export, and JSON-log correlation.
 - Opt-in local PII detection, redaction, or blocking with content-free audit metadata.
@@ -131,6 +132,8 @@ The Compose volume persists quota history. Put a TLS reverse proxy or cloud load
 - [Development and CI verification](docs/DEVELOPMENT.md)
 - [Database migration and rollback operations](docs/DATABASE_MIGRATIONS.md)
 - [Compatibility and deprecation policy](docs/COMPATIBILITY.md)
+- [Phase 3 threat model](docs/PHASE3_THREAT_MODEL.md)
+- [Key-rotation runbook](docs/KEY_ROTATION_RUNBOOK.md)
 - [Release preparation and verification](docs/RELEASING.md)
 - Interactive API reference: `http://localhost:8000/docs`
 

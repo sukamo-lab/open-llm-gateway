@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import secrets
 import time
 import uuid
@@ -9,6 +10,7 @@ from collections import OrderedDict
 import asyncpg
 
 from .config import Limit, ProviderConfig
+from .authorization import BUILTIN_ROLES, apply_key_ceiling, role_permissions
 from .identity import AuthContext
 from .migrations import migrate_postgres, postgres_status
 from .quota import Reservation
@@ -21,7 +23,7 @@ class PostgresStore:
         self, dsn: str, cache_seconds: int = 5, cache_max_entries: int = 10_000,
         identity_enabled: bool = True, provider_quotas: bool = True,
         tenant_quotas: bool = True, accounting: bool = True,
-        cost_tracking: bool = True,
+        cost_tracking: bool = True, rbac_enabled: bool = False,
     ):
         self.dsn = dsn
         self.cache_seconds = cache_seconds
@@ -31,6 +33,7 @@ class PostgresStore:
         self.tenant_quotas = tenant_quotas
         self.accounting = accounting
         self.cost_tracking = cost_tracking
+        self.rbac_enabled = rbac_enabled
         self.usage_enabled = provider_quotas or tenant_quotas or accounting
         self.pool: asyncpg.Pool | None = None
         self._cache: OrderedDict[str, tuple[float, AuthContext | None]] = OrderedDict()
@@ -183,42 +186,172 @@ class PostgresStore:
         if cached and cached[0] > now:
             self._cache.move_to_end(digest)
             return cached[1]
-        row = await self.pool.fetchrow("""SELECT k.id key_id,t.* FROM consumer_keys k
+        row = await self.pool.fetchrow("""SELECT k.id key_id,k.principal_id,
+            k.project_id key_project_id,k.permission_ceiling,t.* FROM consumer_keys k
             JOIN tenants t ON t.id=k.tenant_id WHERE k.key_hash=$1 AND k.active AND t.active
             AND (k.expires_at IS NULL OR k.expires_at > $2)""", digest, time.time())
-        context = AuthContext(row["id"], row["key_id"], self._limits(row)) if row else None
+        context = None
+        if row:
+            permissions: frozenset[str] = frozenset()
+            valid = True
+            if self.rbac_enabled:
+                valid = bool(row["principal_id"] and row["organization_id"])
+                principal = await self.pool.fetchval(
+                    """SELECT 1 FROM principals p JOIN organizations o ON o.id=p.organization_id
+                    LEFT JOIN projects q ON q.id=p.project_id
+                    WHERE p.id=$1 AND p.organization_id=$2 AND p.active AND o.active
+                    AND (p.project_id IS NULL OR (p.project_id=$3 AND q.active))""",
+                    row["principal_id"], row["organization_id"], row["key_project_id"],
+                ) if valid else None
+                valid = bool(principal)
+                if valid:
+                    roles = await self.pool.fetch(
+                        """SELECT role_name FROM role_bindings WHERE principal_id=$1
+                        AND organization_id=$2 AND (project_id IS NULL OR project_id=$3)""",
+                        row["principal_id"], row["organization_id"], row["key_project_id"],
+                    )
+                    granted = role_permissions([item["role_name"] for item in roles])
+                    ceiling = json.loads(row["permission_ceiling"]) if row["permission_ceiling"] else None
+                    permissions = apply_key_ceiling(granted, ceiling)
+            if valid:
+                context = AuthContext(
+                    row["id"], row["key_id"], self._limits(row), row["organization_id"],
+                    row["key_project_id"], row["principal_id"], permissions,
+                )
         if row:
             await self.pool.execute("UPDATE consumer_keys SET last_used_at=$1 WHERE id=$2", time.time(), row["key_id"])
         self._cache_put(digest, context, now + self.cache_seconds)
         return context
 
-    async def create_tenant(self, name: str, requests_per_minute=None, tokens_per_day=None, cost_per_30_days=None):
+    async def authenticate_oidc(
+        self, issuer: str, subject: str, tenant_id: str,
+        organization_id: str, project_id: str | None,
+    ) -> AuthContext | None:
         assert self.pool
+        canonical_subject = f"{issuer.rstrip('/')}|{subject}"
+        row = await self.pool.fetchrow(
+            """SELECT p.id principal_id,t.* FROM principals p JOIN tenants t
+            ON t.organization_id=p.organization_id
+            JOIN organizations o ON o.id=p.organization_id
+            LEFT JOIN projects q ON q.id=p.project_id
+            WHERE p.subject=$1 AND p.kind='user' AND p.active
+            AND o.active AND (p.project_id IS NULL OR q.active)
+            AND p.organization_id=$2 AND (p.project_id IS NULL OR p.project_id=$3)
+            AND t.id=$4 AND t.active""",
+            canonical_subject, organization_id, project_id, tenant_id,
+        )
+        if not row:
+            return None
+        roles = await self.pool.fetch(
+            """SELECT role_name FROM role_bindings WHERE principal_id=$1
+            AND organization_id=$2 AND (project_id IS NULL OR project_id=$3)""",
+            row["principal_id"], organization_id, project_id,
+        )
+        return AuthContext(
+            tenant_id, f"oidc:{row['principal_id']}", self._limits(row), organization_id,
+            project_id, row["principal_id"], role_permissions([item["role_name"] for item in roles]),
+        )
+
+    async def create_tenant(
+        self, name: str, requests_per_minute=None, tokens_per_day=None,
+        cost_per_30_days=None, organization_id: str | None = None,
+    ):
+        assert self.pool
+        if organization_id and not await self.pool.fetchval(
+            "SELECT 1 FROM organizations WHERE id=$1 AND active", organization_id
+        ):
+            raise KeyError("organization not found or disabled")
         tenant_id = str(uuid.uuid4())
-        await self.pool.execute("INSERT INTO tenants VALUES($1,$2,TRUE,$3,$4,$5,$6)", tenant_id, name, requests_per_minute, tokens_per_day, cost_per_30_days, time.time())
-        return {"id": tenant_id, "name": name, "active": True}
+        await self.pool.execute(
+            """INSERT INTO tenants
+            (id,name,active,requests_per_minute,tokens_per_day,cost_per_30_days,created_at,organization_id)
+            VALUES($1,$2,TRUE,$3,$4,$5,$6,$7)""",
+            tenant_id, name, requests_per_minute, tokens_per_day,
+            cost_per_30_days, time.time(), organization_id,
+        )
+        return {"id": tenant_id, "name": name, "active": True, "organization_id": organization_id}
 
     async def list_tenants(self):
         assert self.pool
         return [dict(row) for row in await self.pool.fetch("SELECT * FROM tenants ORDER BY created_at")]
 
-    async def issue_key(self, tenant_id: str, name: str, expires_in_days: int | None = None):
+    async def issue_key(
+        self, tenant_id: str, name: str, expires_in_days: int | None = None,
+        principal_id: str | None = None, project_id: str | None = None,
+        permissions: list[str] | None = None,
+    ):
         assert self.pool
-        if not await self.pool.fetchval("SELECT 1 FROM tenants WHERE id=$1 AND active", tenant_id):
+        tenant = await self.pool.fetchrow(
+            "SELECT organization_id FROM tenants WHERE id=$1 AND active", tenant_id
+        )
+        if not tenant:
             raise KeyError("tenant not found or disabled")
+        if self.rbac_enabled:
+            if not principal_id or not tenant["organization_id"]:
+                raise ValueError("RBAC keys require a principal and organization-bound tenant")
+            principal = await self.pool.fetchrow(
+                "SELECT organization_id,project_id FROM principals WHERE id=$1 AND active", principal_id
+            )
+            if not principal or principal["organization_id"] != tenant["organization_id"]:
+                raise KeyError("principal not found in tenant organization")
+            if not await self.pool.fetchval(
+                "SELECT 1 FROM organizations WHERE id=$1 AND active", tenant["organization_id"]
+            ):
+                raise KeyError("tenant organization not found or disabled")
+            if project_id and principal["project_id"] not in (None, project_id):
+                raise KeyError("principal is not valid for requested project")
+            roles = await self.pool.fetch(
+                """SELECT role_name FROM role_bindings WHERE principal_id=$1
+                AND organization_id=$2 AND (project_id IS NULL OR project_id=$3)""",
+                principal_id, tenant["organization_id"], project_id,
+            )
+            granted = role_permissions([item["role_name"] for item in roles])
+            requested = apply_key_ceiling(granted, permissions)
+            if permissions is not None and requested != frozenset(permissions):
+                raise PermissionError("key scope exceeds principal permissions")
         key_id, secret = uuid.uuid4().hex, secrets.token_urlsafe(32)
         token = f"lgw_live_{key_id}.{secret}"
         expires_at = time.time() + expires_in_days * 86400 if expires_in_days else None
         await self.pool.execute("""INSERT INTO consumer_keys
-            (id,tenant_id,name,key_prefix,key_hash,active,created_at,last_used_at,expires_at)
-            VALUES($1,$2,$3,$4,$5,TRUE,$6,NULL,$7)""",
-            key_id, tenant_id, name, token[:20], self._hash(token), time.time(), expires_at)
+            (id,tenant_id,name,key_prefix,key_hash,active,created_at,last_used_at,expires_at,
+            principal_id,project_id,permission_ceiling)
+            VALUES($1,$2,$3,$4,$5,TRUE,$6,NULL,$7,$8,$9,$10)""",
+            key_id, tenant_id, name, token[:20], self._hash(token), time.time(), expires_at,
+            principal_id, project_id, json.dumps(permissions) if permissions is not None else None)
         return {"id": key_id, "tenant_id": tenant_id, "name": name, "api_key": token, "expires_at": expires_at}
 
-    async def list_keys(self, tenant_id: str):
+    async def list_keys(self, tenant_id: str, project_id: str | None = None):
         assert self.pool
-        rows = await self.pool.fetch("SELECT id,name,key_prefix,active,created_at,last_used_at,expires_at FROM consumer_keys WHERE tenant_id=$1 ORDER BY created_at", tenant_id)
+        if project_id:
+            rows = await self.pool.fetch("""SELECT id,name,key_prefix,active,created_at,last_used_at,
+                expires_at,principal_id,project_id FROM consumer_keys
+                WHERE tenant_id=$1 AND project_id=$2 ORDER BY created_at""", tenant_id, project_id)
+        else:
+            rows = await self.pool.fetch("""SELECT id,name,key_prefix,active,created_at,last_used_at,
+                expires_at,principal_id,project_id FROM consumer_keys
+                WHERE tenant_id=$1 ORDER BY created_at""", tenant_id)
         return [dict(row) for row in rows]
+
+    async def tenant_organization(self, tenant_id: str):
+        assert self.pool
+        return await self.pool.fetchval("SELECT organization_id FROM tenants WHERE id=$1", tenant_id)
+
+    async def key_organization(self, key_id: str):
+        assert self.pool
+        return await self.pool.fetchval(
+            """SELECT t.organization_id FROM consumer_keys k
+            JOIN tenants t ON t.id=k.tenant_id WHERE k.id=$1""", key_id,
+        )
+
+    async def key_scope(self, key_id: str):
+        assert self.pool
+        row = await self.pool.fetchrow("""SELECT t.organization_id,k.project_id FROM consumer_keys k
+            JOIN tenants t ON t.id=k.tenant_id WHERE k.id=$1""", key_id)
+        return (row["organization_id"], row["project_id"]) if row else (None, None)
+
+    async def principal_project(self, principal_id: str):
+        assert self.pool
+        return await self.pool.fetchval("SELECT project_id FROM principals WHERE id=$1", principal_id)
 
     async def revoke_key(self, key_id: str) -> bool:
         assert self.pool
@@ -228,9 +361,17 @@ class PostgresStore:
 
     async def update_tenant(self, tenant_id: str, changes: dict[str, object]):
         assert self.pool
-        allowed = {"name", "active", "requests_per_minute", "tokens_per_day", "cost_per_30_days"}
+        allowed = {
+            "name", "active", "requests_per_minute", "tokens_per_day",
+            "cost_per_30_days", "organization_id",
+        }
         values = {key: value for key, value in changes.items() if key in allowed}
         if values:
+            organization_id = values.get("organization_id")
+            if organization_id and not await self.pool.fetchval(
+                "SELECT 1 FROM organizations WHERE id=$1 AND active", organization_id
+            ):
+                raise KeyError("organization not found or disabled")
             assignments = ", ".join(f"{key}=${index}" for index, key in enumerate(values, 1))
             await self.pool.execute(
                 f"UPDATE tenants SET {assignments} WHERE id=${len(values) + 1}",
@@ -238,4 +379,173 @@ class PostgresStore:
             )
             self._cache.clear()
         row = await self.pool.fetchrow("SELECT * FROM tenants WHERE id=$1", tenant_id)
+        return dict(row) if row else None
+
+    async def create_organization(self, name: str):
+        assert self.pool
+        item = {"id": str(uuid.uuid4()), "name": name, "active": True, "created_at": time.time()}
+        await self.pool.execute(
+            "INSERT INTO organizations(id,name,active,created_at) VALUES($1,$2,TRUE,$3)",
+            item["id"], name, item["created_at"],
+        )
+        return item
+
+    async def list_organizations(self, organization_id: str | None = None):
+        assert self.pool
+        if organization_id:
+            rows = await self.pool.fetch("SELECT * FROM organizations WHERE id=$1", organization_id)
+        else:
+            rows = await self.pool.fetch("SELECT * FROM organizations ORDER BY created_at")
+        return [dict(row) for row in rows]
+
+    async def create_project(self, organization_id: str, name: str):
+        assert self.pool
+        if not await self.pool.fetchval(
+            "SELECT 1 FROM organizations WHERE id=$1 AND active", organization_id
+        ):
+            raise KeyError("organization not found or disabled")
+        item = {
+            "id": str(uuid.uuid4()), "organization_id": organization_id,
+            "name": name, "active": True, "created_at": time.time(),
+        }
+        await self.pool.execute(
+            "INSERT INTO projects(id,organization_id,name,active,created_at) VALUES($1,$2,$3,TRUE,$4)",
+            item["id"], organization_id, name, item["created_at"],
+        )
+        return item
+
+    async def list_projects(self, organization_id: str):
+        assert self.pool
+        rows = await self.pool.fetch(
+            "SELECT * FROM projects WHERE organization_id=$1 ORDER BY created_at", organization_id
+        )
+        return [dict(row) for row in rows]
+
+    async def create_principal(
+        self, organization_id: str, kind: str, subject: str,
+        display_name: str, project_id: str | None = None,
+    ):
+        assert self.pool
+        if not await self.pool.fetchval(
+            "SELECT 1 FROM organizations WHERE id=$1 AND active", organization_id
+        ):
+            raise KeyError("organization not found or disabled")
+        if project_id and not await self.pool.fetchval(
+            "SELECT 1 FROM projects WHERE id=$1 AND organization_id=$2 AND active",
+            project_id, organization_id,
+        ):
+            raise KeyError("project not found in organization or disabled")
+        item = {
+            "id": str(uuid.uuid4()), "organization_id": organization_id,
+            "project_id": project_id, "kind": kind, "subject": subject,
+            "display_name": display_name, "active": True, "created_at": time.time(),
+        }
+        await self.pool.execute(
+            """INSERT INTO principals
+            (id,organization_id,project_id,kind,subject,display_name,active,created_at)
+            VALUES($1,$2,$3,$4,$5,$6,TRUE,$7)""",
+            item["id"], organization_id, project_id, kind, subject,
+            display_name, item["created_at"],
+        )
+        return item
+
+    async def list_principals(self, organization_id: str, project_id: str | None = None):
+        assert self.pool
+        if project_id:
+            rows = await self.pool.fetch(
+                """SELECT * FROM principals WHERE organization_id=$1 AND project_id=$2
+                ORDER BY created_at""", organization_id, project_id)
+        else:
+            rows = await self.pool.fetch(
+                "SELECT * FROM principals WHERE organization_id=$1 ORDER BY created_at", organization_id
+            )
+        return [dict(row) for row in rows]
+
+    async def assign_role(
+        self, organization_id: str, principal_id: str, role_name: str,
+        project_id: str | None = None,
+    ):
+        assert self.pool
+        if role_name not in BUILTIN_ROLES:
+            raise ValueError("unknown role")
+        principal = await self.pool.fetchrow(
+            "SELECT organization_id,project_id FROM principals WHERE id=$1 AND active", principal_id
+        )
+        if not principal or principal["organization_id"] != organization_id:
+            raise KeyError("principal not found in organization")
+        if project_id:
+            project = await self.pool.fetchval(
+                "SELECT 1 FROM projects WHERE id=$1 AND organization_id=$2 AND active",
+                project_id, organization_id,
+            )
+            if not project or principal["project_id"] not in (None, project_id):
+                raise KeyError("project or principal scope mismatch")
+        item = {
+            "id": str(uuid.uuid4()), "organization_id": organization_id,
+            "principal_id": principal_id, "role_name": role_name,
+            "project_id": project_id, "created_at": time.time(),
+        }
+        await self.pool.execute(
+            """INSERT INTO role_bindings
+            (id,organization_id,principal_id,role_name,project_id,created_at)
+            VALUES($1,$2,$3,$4,$5,$6)""",
+            *item.values(),
+        )
+        self._cache.clear()
+        return item
+
+    async def list_role_bindings(self, organization_id: str):
+        assert self.pool
+        rows = await self.pool.fetch(
+            "SELECT * FROM role_bindings WHERE organization_id=$1 ORDER BY created_at", organization_id
+        )
+        return [dict(row) for row in rows]
+
+    async def revoke_role_binding(self, organization_id: str, binding_id: str):
+        assert self.pool
+        result = await self.pool.execute(
+            "DELETE FROM role_bindings WHERE id=$1 AND organization_id=$2", binding_id, organization_id
+        )
+        self._cache.clear()
+        return result.endswith("1")
+
+    async def update_organization(self, organization_id: str, changes: dict[str, object]):
+        return await self._update_hierarchy("organizations", organization_id, changes, {"name", "active"})
+
+    async def update_project(
+        self, organization_id: str, project_id: str, changes: dict[str, object],
+    ):
+        return await self._update_hierarchy(
+            "projects", project_id, changes, {"name", "active"}, organization_id,
+        )
+
+    async def update_principal(
+        self, organization_id: str, principal_id: str, changes: dict[str, object],
+    ):
+        return await self._update_hierarchy(
+            "principals", principal_id, changes, {"display_name", "active"}, organization_id,
+        )
+
+    async def _update_hierarchy(
+        self, table: str, item_id: str, changes: dict[str, object], allowed: set[str],
+        organization_id: str | None = None,
+    ):
+        assert self.pool
+        values = {key: value for key, value in changes.items() if key in allowed}
+        if values:
+            assignments = ",".join(f"{key}=${index}" for index, key in enumerate(values, 1))
+            where_index = len(values) + 1
+            query = f"UPDATE {table} SET {assignments} WHERE id=${where_index}"
+            parameters = [*values.values(), item_id]
+            if organization_id:
+                query += f" AND organization_id=${where_index + 1}"
+                parameters.append(organization_id)
+            await self.pool.execute(query, *parameters)
+        if organization_id:
+            row = await self.pool.fetchrow(
+                f"SELECT * FROM {table} WHERE id=$1 AND organization_id=$2", item_id, organization_id
+            )
+        else:
+            row = await self.pool.fetchrow(f"SELECT * FROM {table} WHERE id=$1", item_id)
+        self._cache.clear()
         return dict(row) if row else None

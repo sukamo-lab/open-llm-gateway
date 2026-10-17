@@ -70,3 +70,9 @@ CI jobs receive read-only repository permissions. No provider secrets are needed
 - Every configurable feature needs tests for both enabled and disabled behavior.
 
 Database changes must be expressed as numbered component migrations in `migrations.py`, include legacy-data preservation tests, and update [Database migrations](DATABASE_MIGRATIONS.md). Never edit an already released migration; add the next version.
+
+## Phase 3 local overhead baseline
+
+On 2026-10-16, a Windows in-process FastAPI `TestClient` run measured 400 warmed `GET /v1/models` requests. Minimal single-user mode (all Phase 3 features disabled) measured p50 1.107 ms, p95 2.634 ms, and p99 3.376 ms. Managed RBAC with a cached principal-bound key measured p50 1.982 ms, p95 4.416 ms, and p99 4.916 ms: deltas of 0.875 ms, 1.782 ms, and 1.540 ms. These figures include test-client scheduling overhead, are not production capacity claims, and should be repeated on deployment hardware with `scripts/load_test.py`.
+
+On 2026-10-17, the complete local test suite passed with 267 tests passed and 4 environment-dependent tests skipped. Ruff passed, and isolated sdist/wheel builds produced `llm_gateway-0.5.0.tar.gz` and `llm_gateway-0.5.0-py3-none-any.whl`. Hosted CI and live PostgreSQL verification remain separate gates.

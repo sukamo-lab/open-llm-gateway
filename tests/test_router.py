@@ -32,6 +32,74 @@ class BrokenAfterFirstChunk(httpx.AsyncByteStream):
         raise httpx.ReadError("stream interrupted")
 
 
+@pytest.mark.asyncio
+async def test_overlapping_provider_credentials_fall_back_without_exposure(tmp_path, monkeypatch):
+    monkeypatch.setenv("NEW_PROVIDER_KEY", "new-secret")
+    monkeypatch.setenv("OLD_PROVIDER_KEY", "old-secret")
+    config = make_config(tmp_path, [{
+        "name": "rotating", "base_url": "https://rotating.example/v1", "tier": "free",
+        "credentials": [
+            {"id": "new", "api_key_env": "NEW_PROVIDER_KEY"},
+            {"id": "old", "api_key_env": "OLD_PROVIDER_KEY"},
+        ],
+        "models": [{"name": "chat", "upstream_model": "model"}],
+    }])
+    seen = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers["authorization"])
+        if request.headers["authorization"] == "Bearer new-secret":
+            return httpx.Response(401, json={"error": "invalid"})
+        return httpx.Response(200, json={
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+            "usage": {"total_tokens": 1},
+        })
+
+    quota = QuotaStore(config.database)
+    await quota.initialize()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        body, selected, _ = await GatewayRouter(config, quota, client).complete_for({
+            "model": "chat", "messages": [{"role": "user", "content": "hello"}],
+        })
+    assert body["choices"][0]["message"]["content"] == "ok"
+    assert selected == "rotating"
+    assert seen == ["Bearer new-secret", "Bearer old-secret"]
+    dumped = str(config.model_dump(mode="json"))
+    assert "new-secret" not in dumped
+    assert "old-secret" not in dumped
+
+
+@pytest.mark.asyncio
+async def test_stream_uses_next_overlapping_credential_before_emitting_bytes(tmp_path, monkeypatch):
+    monkeypatch.setenv("NEW_PROVIDER_KEY", "new-secret")
+    monkeypatch.setenv("OLD_PROVIDER_KEY", "old-secret")
+    config = make_config(tmp_path, [{
+        "name": "rotating", "base_url": "https://rotating.example/v1", "tier": "free",
+        "credentials": [
+            {"id": "new", "api_key_env": "NEW_PROVIDER_KEY"},
+            {"id": "old", "api_key_env": "OLD_PROVIDER_KEY"},
+        ],
+        "models": [{"name": "chat", "upstream_model": "model"}],
+    }])
+    seen = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers["authorization"])
+        if request.headers["authorization"] == "Bearer new-secret":
+            return httpx.Response(403, content=b"rejected")
+        return httpx.Response(200, content=b"data: accepted\n\n")
+
+    quota = QuotaStore(config.database)
+    await quota.initialize()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        chunks = [chunk async for chunk in GatewayRouter(config, quota, client).stream({
+            "model": "chat", "messages": [{"role": "user", "content": "hello"}],
+        })]
+
+    assert b"".join(chunks) == b"data: accepted\n\n"
+    assert seen == ["Bearer new-secret", "Bearer old-secret"]
+
+
 def test_free_models_precede_paid_and_reasoning_is_required(tmp_path, monkeypatch):
     for key in ("FREE_KEY", "PAID_KEY"):
         monkeypatch.setenv(key, "secret")
@@ -163,6 +231,33 @@ def test_latency_routing_uses_ewma_and_preserves_free_first(tmp_path, monkeypatc
     ranked = router.rank_by_latency(candidates, "chat")
     assert [candidate.model.name for candidate in ranked] == ["fast", "slow", "paid"]
     assert router.latency_state(by_name["slow"], "chat")["ewma_ms"] == 900
+
+
+def test_residency_enforcement_cannot_fallback_or_be_overridden(tmp_path, monkeypatch):
+    monkeypatch.setenv("EU_KEY", "secret")
+    monkeypatch.setenv("US_KEY", "secret")
+    config = GatewayConfig.model_validate({
+        "database": str(tmp_path / "usage.db"),
+        "features": {"routing_policy": True, "residency_enforcement": True},
+        "residency": {"policy": "eu-only"},
+        "routing": {"allow_policy_override": True, "policies": [{
+            "name": "eu-only", "residencies": ["eu"], "regions": ["eu-west"], "fallback": "deny",
+        }, {"name": "unrestricted", "fallback": "default"}]},
+        "providers": [
+            {**provider("eu", "free", "EU_KEY", [{"name": "chat", "upstream_model": "eu"}]),
+             "region": "eu-west", "residencies": ["eu"]},
+            {**provider("us", "free", "US_KEY", [{"name": "chat", "upstream_model": "us"}]),
+             "region": "us-east", "residencies": ["us"]},
+        ],
+    })
+    router = GatewayRouter(config, QuotaStore(config.database), httpx.AsyncClient())
+    candidates, selected = router.apply_routing_policy(router.candidates("chat", False), "chat", "chat")
+    assert selected and selected.name == "eu-only"
+    assert [item.provider.name for item in candidates] == ["eu"]
+    with pytest.raises(NoModelAvailable, match="cannot bypass"):
+        router.apply_routing_policy(
+            router.candidates("chat", False), "chat", "chat", "unrestricted"
+        )
 
 
 def test_latency_routing_explores_least_sampled_deterministically(tmp_path, monkeypatch):

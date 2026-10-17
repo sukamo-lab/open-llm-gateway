@@ -52,6 +52,29 @@ class ModelConfig(StrictModel):
         return self
 
 
+class ProviderCredentialConfig(StrictModel):
+    id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    api_key_env: str | None = None
+    api_key_file: str | None = None
+    enabled: bool = True
+
+    @model_validator(mode="after")
+    def one_source(self) -> "ProviderCredentialConfig":
+        if bool(self.api_key_env) == bool(self.api_key_file):
+            raise ValueError("provider credential requires exactly one environment or file source")
+        return self
+
+    def value(self) -> str | None:
+        if not self.enabled:
+            return None
+        if self.api_key_env:
+            return os.getenv(self.api_key_env) or None
+        try:
+            return Path(self.api_key_file or "").read_text(encoding="utf-8").strip() or None
+        except OSError:
+            return None
+
+
 class ProviderConfig(StrictModel):
     name: str
     base_url: str
@@ -64,6 +87,7 @@ class ProviderConfig(StrictModel):
     api_key_env: str | None = None
     api_key_file: str | None = None
     api_key_value: str | None = None
+    credentials: list[ProviderCredentialConfig] = Field(default_factory=list, max_length=10)
     api_key_header: str = "Authorization"
     api_key_prefix: str = "Bearer"
     tier: Literal["free", "paid"] = "free"
@@ -83,6 +107,9 @@ class ProviderConfig(StrictModel):
     models: list[ModelConfig]
 
     def api_key(self) -> str | None:
+        configured = self.credential_values()
+        if configured:
+            return configured[0][1]
         if self.api_key_env:
             value = os.getenv(self.api_key_env)
             if value:
@@ -98,10 +125,16 @@ class ProviderConfig(StrictModel):
             return self.api_key_value
         return None
 
+    def credential_values(self) -> list[tuple[str, str]]:
+        return [(item.id, value) for item in self.credentials if (value := item.value())]
+
     @model_validator(mode="after")
     def has_api_key_source(self) -> "ProviderConfig":
-        if not self.api_key_env and not self.api_key_file and not self.api_key_value:
+        if not self.credentials and not self.api_key_env and not self.api_key_file and not self.api_key_value:
             raise ValueError("set api_key_env, api_key_file, or api_key_value")
+        credential_ids = [item.id for item in self.credentials]
+        if len(credential_ids) != len(set(credential_ids)):
+            raise ValueError("provider credential ids must be unique")
         if not self.base_url.startswith(("https://", "http://")):
             raise ValueError("base_url must start with http:// or https://")
         names = [model.name for model in self.models]
@@ -135,6 +168,10 @@ class GatewayConfig(StrictModel):
     images: "ImagesConfig" = Field(default_factory=lambda: ImagesConfig())
     model_discovery: "ModelDiscoveryConfig" = Field(default_factory=lambda: ModelDiscoveryConfig())
     config_reload: "ConfigReloadConfig" = Field(default_factory=lambda: ConfigReloadConfig())
+    oidc: "OIDCConfig" = Field(default_factory=lambda: OIDCConfig())
+    audit: "AuditConfig" = Field(default_factory=lambda: AuditConfig())
+    encryption: "EncryptionConfig" = Field(default_factory=lambda: EncryptionConfig())
+    residency: "ResidencyConfig" = Field(default_factory=lambda: ResidencyConfig())
     features: "FeatureConfig" = Field(default_factory=lambda: FeatureConfig())
     providers: list[ProviderConfig]
 
@@ -148,6 +185,12 @@ class GatewayConfig(StrictModel):
         defaults = {
             "single": {
                 "authentication": False, "admin_api": False, "managed_keys": False,
+                "identity_hierarchy": False,
+                "rbac": False,
+                "oidc": False,
+                "audit_ledger": False,
+                "envelope_encryption": False,
+                "residency_enforcement": False,
                 "tenant_quotas": False, "provider_quotas": False,
                 "usage_accounting": False, "cost_tracking": False,
                 "metrics": False, "circuit_breaker": True, "structured_logging": False,
@@ -170,6 +213,12 @@ class GatewayConfig(StrictModel):
             },
             "multi": {
                 "authentication": True, "admin_api": True, "managed_keys": True,
+                "identity_hierarchy": False,
+                "rbac": False,
+                "oidc": False,
+                "audit_ledger": False,
+                "envelope_encryption": False,
+                "residency_enforcement": False,
                 "tenant_quotas": True, "provider_quotas": True,
                 "usage_accounting": True, "cost_tracking": True,
                 "metrics": True, "circuit_breaker": True, "structured_logging": True,
@@ -198,6 +247,18 @@ class GatewayConfig(StrictModel):
             raise ValueError("managed_keys requires authentication")
         if self.features.managed_keys and not self.features.admin_api:
             raise ValueError("managed_keys requires admin_api")
+        if self.features.identity_hierarchy and not (
+            self.features.authentication and self.features.admin_api and self.features.managed_keys
+        ):
+            raise ValueError("identity_hierarchy requires authentication, admin_api, and managed_keys")
+        if self.features.rbac and not self.features.identity_hierarchy:
+            raise ValueError("rbac requires identity_hierarchy")
+        if self.features.oidc and not self.features.rbac:
+            raise ValueError("oidc requires rbac")
+        if self.features.oidc and (not self.oidc.issuer or not self.oidc.audience):
+            raise ValueError("oidc requires issuer and audience")
+        if self.features.audit_ledger and not self.features.admin_api:
+            raise ValueError("audit_ledger requires admin_api")
         if self.features.tenant_quotas and not self.features.managed_keys:
             raise ValueError("tenant_quotas requires managed_keys")
         if self.features.cost_tracking and not self.features.usage_accounting:
@@ -208,6 +269,12 @@ class GatewayConfig(StrictModel):
             raise ValueError("config_reload requires admin_api")
         if self.features.routing_policy and not self.routing.policies:
             raise ValueError("routing_policy requires at least one routing policy")
+        if self.features.residency_enforcement:
+            if not self.features.routing_policy:
+                raise ValueError("residency_enforcement requires routing_policy")
+            policy = next((item for item in self.routing.policies if item.name == self.residency.policy), None)
+            if policy is None or not policy.residencies or policy.fallback != "deny":
+                raise ValueError("residency policy must exist, require residencies, and deny fallback")
         if self.features.config_reload and self.features.exact_cache:
             raise ValueError("config_reload cannot be combined with exact_cache")
         if self.features.cost_routing and self.features.latency_routing:
@@ -310,6 +377,43 @@ class GatewayConfig(StrictModel):
             for policy in self.routing.policies
         ):
             issues.append(("WARN", "a residency routing policy permits default fallback"))
+        if self.features.residency_enforcement:
+            policy = next(item for item in self.routing.policies if item.name == self.residency.policy)
+            if not any(
+                provider.enabled and provider.api_key()
+                and (not policy.providers or provider.name in policy.providers)
+                and (not policy.regions or provider.region in policy.regions)
+                and policy.residencies.issubset(provider.residencies)
+                for provider in self.providers
+            ):
+                issues.append(("ERROR", "residency enforcement has no configured eligible provider"))
+        if self.features.envelope_encryption:
+            import base64
+            import importlib.util
+            import json
+
+            raw_keys = os.getenv(self.encryption.keys_env)
+            try:
+                keyring = json.loads(raw_keys or "")
+                decoded = {
+                    str(version): base64.b64decode(value, validate=True)
+                    for version, value in keyring.items()
+                }
+                if self.encryption.active_key_version not in decoded or any(
+                    len(value) != 32 for value in decoded.values()
+                ):
+                    raise ValueError
+            except Exception:
+                issues.append(("ERROR", "envelope encryption keyring is missing or invalid"))
+            if importlib.util.find_spec("cryptography") is None:
+                issues.append(("ERROR", "envelope encryption requires the security package extra"))
+        if self.features.oidc:
+            import importlib.util
+
+            if importlib.util.find_spec("jwt") is None:
+                issues.append(("ERROR", "OIDC requires the oidc package extra"))
+        if self.features.audit_ledger and self.audit.export_url and self.audit.export_url.startswith("http://"):
+            issues.append(("WARN", "audit export URL is not encrypted"))
         endpoint = self.telemetry.endpoint()
         if self.features.tracing and endpoint and endpoint.startswith("http://"):
             issues.append(("WARN", "OpenTelemetry exporter endpoint is not encrypted"))
@@ -636,10 +740,62 @@ class ConfigReloadConfig(StrictModel):
     max_generations: int = Field(default=10, ge=1, le=100)
 
 
+class OIDCConfig(StrictModel):
+    issuer: str | None = None
+    audience: str | None = None
+    algorithms: list[str] = Field(default_factory=lambda: ["RS256"])
+    jwks_cache_seconds: int = Field(default=300, ge=30, le=86400)
+    jwks_max_keys: int = Field(default=32, ge=1, le=128)
+    clock_skew_seconds: int = Field(default=30, ge=0, le=300)
+    http_timeout_seconds: float = Field(default=5, gt=0, le=30)
+    tenant_id_claim: str = "tenant_id"
+    organization_id_claim: str = "organization_id"
+    project_id_claim: str = "project_id"
+    allow_insecure_http: bool = False
+    max_token_bytes: int = Field(default=16_384, ge=1024, le=131_072)
+
+    @model_validator(mode="after")
+    def validate_security(self) -> "OIDCConfig":
+        allowed = {"RS256", "RS384", "RS512", "ES256", "ES384", "ES512"}
+        if not self.algorithms or not set(self.algorithms) <= allowed:
+            raise ValueError("OIDC algorithms must be explicit asymmetric signing algorithms")
+        if self.issuer and not self.issuer.startswith("https://") and not self.allow_insecure_http:
+            raise ValueError("OIDC issuer must use HTTPS")
+        claims = (self.tenant_id_claim, self.organization_id_claim, self.project_id_claim)
+        if any(not value or len(value) > 128 for value in claims):
+            raise ValueError("OIDC claim mappings must be bounded non-empty names")
+        return self
+
+
+class AuditConfig(StrictModel):
+    export_url: str | None = None
+    export_token_env: str | None = None
+    export_batch_size: int = Field(default=500, ge=1, le=10_000)
+    export_timeout_seconds: float = Field(default=10, gt=0, le=60)
+    read_max_events: int = Field(default=1000, ge=1, le=10_000)
+
+
+class EncryptionConfig(StrictModel):
+    keys_env: str = "LLM_GATEWAY_ENCRYPTION_KEYS"
+    active_key_version: str = Field(default="v1", pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+    rotation_batch_size: int = Field(default=100, ge=1, le=10_000)
+    allow_plaintext_migration: bool = False
+
+
+class ResidencyConfig(StrictModel):
+    policy: str = Field(default="residency", min_length=1, max_length=64)
+
+
 class FeatureConfig(StrictModel):
     authentication: bool | None = None
     admin_api: bool | None = None
     managed_keys: bool | None = None
+    identity_hierarchy: bool | None = None
+    rbac: bool | None = None
+    oidc: bool | None = None
+    audit_ledger: bool | None = None
+    envelope_encryption: bool | None = None
+    residency_enforcement: bool | None = None
     tenant_quotas: bool | None = None
     provider_quotas: bool | None = None
     usage_accounting: bool | None = None
@@ -731,5 +887,10 @@ def load_config(path: str | Path) -> GatewayConfig:
     for provider in data.get("providers", []):
         if provider.get("api_key_file"):
             provider["api_key_file"] = str((config_path.parent / provider["api_key_file"]).resolve())
+        for credential in provider.get("credentials", []):
+            if credential.get("api_key_file"):
+                credential["api_key_file"] = str(
+                    (config_path.parent / credential["api_key_file"]).resolve()
+                )
     return GatewayConfig.model_validate(data)
 
