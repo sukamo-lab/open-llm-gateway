@@ -1,5 +1,7 @@
 # LLM Gateway
 
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
+
 A self-hosted, OpenAI-compatible control plane for routing LLM traffic across free and paid providers. It runs as a Windows/Linux CLI service or Docker container and keeps applications independent of vendor model names, outages, rate limits, and pricing tiers.
 
 It has two explicit profiles: a minimal single-user mode and a fully managed multi-user mode. Major subsystems are independently feature-flagged and disabled modules are removed from the runtime path.
@@ -150,3 +152,11 @@ python -m ruff check src tests scripts
 ```
 
 Python 3.11+ is supported. SQLite is appropriate for one gateway instance; use a shared transactional accounting backend before horizontally scaling multiple replicas.
+
+## Contributing and governance
+
+The project currently uses a controlled-contribution model. Bug reports, feature proposals, documentation feedback, and private security reports are welcome, but unsolicited pull requests are not accepted. Obtain explicit maintainer approval before writing or submitting code. See [Contributing](CONTRIBUTING.md), [Governance](GOVERNANCE.md), [Support](SUPPORT.md), [Security](SECURITY.md), and the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+## License
+
+Licensed under the [Apache License 2.0](LICENSE).

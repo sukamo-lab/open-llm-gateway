@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/sukamo-lab/open-llm-gateway/security/advisories/new
+    about: Report suspected vulnerabilities privately.
+  - name: Support policy
+    url: https://github.com/sukamo-lab/open-llm-gateway/blob/main/SUPPORT.md
+    about: Review supported channels and response expectations.

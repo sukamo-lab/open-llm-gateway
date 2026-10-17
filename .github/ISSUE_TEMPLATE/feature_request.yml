@@ -1,0 +1,38 @@
+name: Feature proposal
+description: Propose a user-facing capability or operational improvement.
+title: "[Proposal]: "
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: A proposal does not authorize a pull request. Wait for explicit maintainer approval before writing code.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the user or operator problem independently of a preferred implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: textarea
+    id: risk
+    attributes:
+      label: Security, compatibility, and operational considerations
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Confirmation
+      options:
+        - label: I searched the roadmap and existing issues.
+          required: true
+        - label: I understand this proposal is not approval to submit code.
+          required: true
