@@ -6,6 +6,7 @@ All notable product changes are recorded here. The project follows [Semantic Ver
 
 ### Added
 
+- Apache-2.0 licensing, maintainer-led governance, controlled contribution guidance, private security reporting, community issue templates, and automated dependency updates.
 - Versioned roadmap and canonical feature-state ledger.
 - Cross-platform CI and PostgreSQL integration-test definitions.
 - Versioned component database migrations with operator commands and rollback guidance.

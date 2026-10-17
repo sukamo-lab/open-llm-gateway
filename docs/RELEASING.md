@@ -2,14 +2,17 @@
 
 ## Prepare
 
-1. Ensure required CI jobs pass on the intended commit.
-2. Choose the next Semantic Version and update all three version sources:
+1. Release only from a reviewed commit merged to protected `main`. Require the unit, quality/package, SDK, PostgreSQL, container, dependency-review, and CodeQL checks where applicable.
+2. Confirm the repository exposes the Apache-2.0 license, security policy, controlled contribution policy, code of conduct, and support expectations. Keep private vulnerability reporting enabled.
+3. Confirm the GitHub `release` environment requires maintainer approval, tag creation is restricted, branch protection prevents direct changes to `main`, and secret scanning/dependency alerts are enabled.
+4. Choose the next Semantic Version and update all three version sources:
    - `pyproject.toml` project version;
    - `src/llm_gateway/__init__.py` `__version__`;
    - `docs/FEATURE_STATUS.yaml` `product_version` and `last_updated`.
-3. Move relevant `CHANGELOG.md` entries from Unreleased under `## [<version>] - YYYY-MM-DD`.
-4. Review feature statuses. A partial capability must remain partial even when included in a release.
-5. Run `python scripts/release_check.py metadata` and the normal test suite.
+5. Move relevant `CHANGELOG.md` entries from Unreleased under `## [<version>] - YYYY-MM-DD`.
+6. Review feature statuses. A partial capability must remain partial even when included in a release.
+7. Run `python scripts/release_check.py metadata`, Ruff, compilation, unit and PostgreSQL tests, package builds, and the installed CLI smoke checks.
+8. Build twice with the pinned release toolchain and require byte-for-byte identical artifacts before tagging.
 
 ## Publish
 
@@ -21,6 +24,8 @@ git push origin v0.6.0
 ```
 
 The release workflow refuses a tag that differs from package metadata. It builds twice, compares bytes, creates checksums and provenance, signs packages with GitHub OIDC/Sigstore, uploads workflow artifacts, and creates the GitHub release.
+
+Never tag a feature branch or an unreviewed release-preparation commit. Never move or reuse a published version tag.
 
 Configure a protected GitHub `release` environment with required reviewers. Limit tag creation to release maintainers. The workflow intentionally does not publish to PyPI until a separate trusted-publisher policy is approved.
 

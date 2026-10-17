@@ -1,0 +1,50 @@
+name: Bug report
+description: Report a reproducible defect without sensitive data.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not report vulnerabilities here. Use the private process in SECURITY.md. Remove credentials, customer data, prompts, and provider responses.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: v0.9.0 or commit SHA
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment
+      options: [Windows, Linux, Docker, Kubernetes, Other]
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Provide safe, deterministic steps using placeholder credentials and synthetic data.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized diagnostics
+      render: shell
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Confirmation
+      options:
+        - label: I searched existing issues.
+          required: true
+        - label: I removed all secrets and customer content.
+          required: true
