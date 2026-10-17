@@ -65,6 +65,7 @@ class Metrics:
         self.pii_events: Counter[tuple[str, str, str]] = Counter()
         self.moderation_events: Counter[tuple[str, str, str]] = Counter()
         self.injection_events: Counter[tuple[str, str]] = Counter()
+        self.security_events: Counter[tuple[str, str]] = Counter()
         self.circuits: dict[str, int] = {}
         self.latency_ms: Counter[str] = Counter()
         self.http_duration = Histogram(http_buckets)
@@ -114,6 +115,10 @@ class Metrics:
     async def prompt_injection(self, action: str, outcome: str) -> None:
         async with self._lock:
             self.injection_events[(action, outcome)] += 1
+
+    async def security(self, control: str, outcome: str) -> None:
+        async with self._lock:
+            self.security_events[(control, outcome)] += 1
 
     async def render(self) -> str:
         async with self._lock:
@@ -193,6 +198,14 @@ class Metrics:
                 for key, count in sorted(self.pii_events.items())
             )
             lines += [
+                "# HELP llm_gateway_security_events_total Phase 3 control outcomes without identity or content labels.",
+                "# TYPE llm_gateway_security_events_total counter",
+            ]
+            lines.extend(
+                f'llm_gateway_security_events_total{_labels(("control", "outcome"), key)} {count}'
+                for key, count in sorted(self.security_events.items())
+            )
+            lines += [
                 "# HELP llm_gateway_provider_circuit_open Whether the provider circuit is open.",
                 "# TYPE llm_gateway_provider_circuit_open gauge",
             ]
@@ -254,6 +267,9 @@ class NullMetrics:
         return None
 
     async def prompt_injection(self, action: str, outcome: str) -> None:
+        return None
+
+    async def security(self, control: str, outcome: str) -> None:
         return None
 
     async def render(self) -> str:

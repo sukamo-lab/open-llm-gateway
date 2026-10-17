@@ -236,9 +236,50 @@ features:
     status: implemented
     verified: 2026-10-12
     evidence: [src/llm_gateway/identity.py, tests/test_identity.py, docs/MULTI_TENANCY.md]
-  - {id: IAM-HIER-001, pillar: iam, name: Organization/project/user/service-account hierarchy, status: planned, target: v0.9}
-  - {id: IAM-RBAC-001, pillar: iam, name: RBAC and scoped API keys, status: planned, target: v0.9, depends_on: [IAM-HIER-001]}
-  - {id: IAM-OIDC-001, pillar: iam, name: OIDC and brokered SAML SSO, status: planned, target: v0.9, depends_on: [IAM-RBAC-001]}
+  - id: IAM-HIER-001
+    pillar: iam
+    name: Organization/project/user/service-account hierarchy
+    status: partial
+    target: v0.9
+    depends_on: [IAM-MODE-001, IAM-KEY-001, DATA-MIG-001]
+    evidence:
+      - src/llm_gateway/identity.py
+      - src/llm_gateway/postgres.py
+      - src/llm_gateway/migrations.py
+      - src/llm_gateway/app.py
+      - tests/test_identity.py
+      - tests/test_migrations.py
+      - docs/MULTI_TENANCY.md
+    notes: Opt-in SQLite/PostgreSQL organization, project, user, and service-account records with organization-scoped uniqueness, tenant binding, cross-organization project rejection, versioned migrations, lifecycle update/deactivation APIs, and CLI commands are implemented. The complete local suite passed on 2026-10-17; hosted CI and live PostgreSQL verification remain pending. Phase 3 disabled-path and cached-RBAC latency measurements are recorded in docs/DEVELOPMENT.md.
+  - id: IAM-RBAC-001
+    pillar: iam
+    name: RBAC and scoped API keys
+    status: partial
+    target: v0.9
+    depends_on: [IAM-HIER-001]
+    evidence:
+      - src/llm_gateway/authorization.py
+      - src/llm_gateway/identity.py
+      - src/llm_gateway/postgres.py
+      - src/llm_gateway/app.py
+      - tests/test_authorization.py
+      - tests/test_identity.py
+      - docs/MULTI_TENANCY.md
+    notes: Opt-in deny-by-default built-in roles, organization/project role bindings and revocation, principal-bound hashed API keys, immutable permission ceilings, request invocation enforcement, delegated organization/project management, lifecycle permission mapping, and cross-scope escalation checks are implemented for SQLite and PostgreSQL. The complete local suite, including the permission matrix, passed on 2026-10-17; hosted CI and live PostgreSQL verification remain pending. Cached-RBAC latency is recorded in docs/DEVELOPMENT.md.
+  - id: IAM-OIDC-001
+    pillar: iam
+    name: OIDC and brokered SAML SSO
+    status: partial
+    target: v0.9
+    depends_on: [IAM-RBAC-001]
+    evidence:
+      - src/llm_gateway/oidc.py
+      - src/llm_gateway/app.py
+      - src/llm_gateway/config.py
+      - tests/test_oidc.py
+      - docs/CONFIGURATION.md
+      - docs/MULTI_TENANCY.md
+    notes: Opt-in fail-closed OIDC discovery and asymmetric JWT validation enforce issuer, audience, algorithm allowlist, key ID, signature, expiry, subject, mapped tenant/organization/project claims, bounded JWKS caching, and unknown-key refresh. SAML is intentionally delegated to an OIDC identity broker. The complete local suite passed on 2026-10-17; hosted CI, real IdP interoperability, login redirect/callback sessions, and latency measurement remain pending.
 
   - id: FIN-QUOTA-001
     pillar: finops
@@ -307,9 +348,46 @@ features:
       - tests/test_router.py
       - docs/CONFIGURATION.md
     notes: An opt-in engine protocol, bounded heuristic scorer, role selection, score/warn/block/safe-model-route actions, fail-open/fail-closed behavior, cache invalidation, diagnostics, and content-free metadata/logs/metrics are implemented; full CI, governed adversarial-corpus calibration, latency benchmarks, and versioned third-party engine loading remain pending. Model safety markers are operator policy assertions, not injection-resistance guarantees.
-  - {id: GOV-RESIDENCY-001, pillar: governance, name: Data residency enforcement, status: planned, target: v0.9, depends_on: [ROUTE-POLICY-001]}
-  - {id: SEC-ENC-001, pillar: governance, name: Envelope encryption for persisted sensitive fields, status: planned, target: v0.9}
-  - {id: SEC-CREDROT-001, pillar: governance, name: Zero-downtime provider credential rotation, status: planned, target: v0.9}
+  - id: GOV-RESIDENCY-001
+    pillar: governance
+    name: Data residency enforcement
+    status: partial
+    target: v0.9
+    depends_on: [ROUTE-POLICY-001]
+    evidence:
+      - src/llm_gateway/config.py
+      - src/llm_gateway/router.py
+      - tests/test_router.py
+      - docs/CONFIGURATION.md
+      - docs/OPERATIONS.md
+    notes: Opt-in enforcement pins every covered request to one named deny-fallback routing policy with required residency assertions, rejects uncovered operations/models, and prevents request policy override from bypassing it. The complete local suite passed on 2026-10-17. Provider region/residency metadata remains an operator assertion; tenant-specific policy assignment, external attestation, hosted CI, and dedicated performance measurement remain pending.
+  - id: SEC-ENC-001
+    pillar: governance
+    name: Envelope encryption for persisted sensitive fields
+    status: partial
+    target: v0.9
+    depends_on: [DATA-MIG-001]
+    evidence:
+      - src/llm_gateway/encryption.py
+      - src/llm_gateway/cache.py
+      - src/llm_gateway/idempotency.py
+      - src/llm_gateway/app.py
+      - tests/test_encryption.py
+      - docs/KEY_ROTATION_RUNBOOK.md
+    notes: Opt-in AES-256-GCM envelope encryption uses random per-record data keys, versioned environment KEKs, authenticated record context, cache/idempotency persistence integration, explicit plaintext migration, and atomic resumable batch rotation for SQLite/PostgreSQL. The complete local suite passed on 2026-10-17. KMS/HSM adapters, provider-credential integration, hosted CI, live PostgreSQL, and performance measurement remain pending.
+  - id: SEC-CREDROT-001
+    pillar: governance
+    name: Zero-downtime provider credential rotation
+    status: partial
+    target: v0.9
+    depends_on: [SEC-SECRET-001]
+    evidence:
+      - src/llm_gateway/config.py
+      - src/llm_gateway/router.py
+      - tests/test_router.py
+      - config.example.yaml
+      - docs/KEY_ROTATION_RUNBOOK.md
+    notes: Providers accept an ordered bounded set of version-labeled environment/file credential references; non-streaming and pre-byte streaming calls immediately retry the next credential only after 401/403 without returning identifiers or values through status APIs, logs, metrics, diagnostics, or audit records. The complete local suite passed on 2026-10-17. Provider health validation/promotion APIs, hosted CI, live provider rotation, and performance measurement remain pending.
 
   - id: OBS-METRIC-001
     pillar: observability
@@ -358,7 +436,20 @@ features:
       - deploy/prometheus/llm-gateway-alerts.yml
       - docs/OPERATIONS.md
     notes: Low-cardinality provider/model result, raw-attempt, retry, cache, circuit, and configurable latency metrics plus vendor-neutral dashboard and alert examples are implemented; hosted Prometheus/Grafana ingestion, production threshold calibration, and full CI verification remain pending.
-  - {id: AUDIT-LEDGER-001, pillar: observability, name: Tamper-evident audit ledger and export, status: planned, target: v0.9}
+  - id: AUDIT-LEDGER-001
+    pillar: observability
+    name: Tamper-evident audit ledger and export
+    status: partial
+    target: v0.9
+    depends_on: [DATA-MIG-001]
+    evidence:
+      - src/llm_gateway/audit.py
+      - src/llm_gateway/migrations.py
+      - src/llm_gateway/app.py
+      - tests/test_audit.py
+      - scripts/verify_audit_export.py
+      - docs/OPERATIONS.md
+    notes: Opt-in SQLite/PostgreSQL append-only security events use a global ordered SHA-256 chain, mutation-prevention triggers, safe bounded metadata, verification APIs, and bounded at-least-once HTTP export with durable checkpoints and replay after failure. The complete local suite passed on 2026-10-17. Direct database administrators can still rewrite rows and recompute an unanchored chain; external anchoring, scheduled export workers, hosted CI, and live PostgreSQL/export-sink verification remain pending.
 
   - id: CFG-YAML-001
     pillar: dx_deployment

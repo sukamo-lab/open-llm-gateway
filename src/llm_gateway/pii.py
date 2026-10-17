@@ -61,7 +61,9 @@ class RegexDetector:
 
 class IPv4Detector(RegexDetector):
     def __init__(self):
-        super().__init__("ipv4", r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])")
+        # Permit ordinary sentence punctuation after an address while still rejecting
+        # a fifth dotted numeric component.
+        super().__init__("ipv4", r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?!\d|\.\d)")
 
     def find(self, text: str) -> Iterable[PIIMatch]:
         for match in super().find(text):

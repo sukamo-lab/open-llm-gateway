@@ -22,6 +22,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+oidc = ["PyJWT[crypto]>=2.10,<3"]
+security = ["cryptography>=43,<47"]
 dev = [
   "build>=1.2,<2",
   "pytest>=8,<9",

@@ -16,7 +16,13 @@ Large configurations can use `include: [providers/*.yaml]`. Paths and glob patte
 
 When `auth.enabled` is true, `/v1/*` requires a bearer token listed in the comma-separated environment variable named by `api_keys_env`. `/admin/*` and `/metrics` require the separate key named by `admin_key_env`. `/health` and `/ready` intentionally remain unauthenticated for orchestrator probes.
 
-`managed_keys_enabled` allows administrator-issued tenant keys. `key_cache_seconds` trades immediate cross-replica revocation for fewer identity lookups; use `0` for immediate enforcement or a small value such as `5` for production.
+`managed_keys_enabled` allows administrator-issued tenant keys. `key_cache_seconds` trades immediate cross-replica revocation for fewer identity lookups; use `0` for immediate enforcement or a small value such as `5` for production. `features.identity_hierarchy` enables organization, project, user, and service-account administration and requires authentication, `admin_api`, and `managed_keys`; it defaults off in both modes.
+
+`features.rbac` requires the hierarchy and changes managed authentication to deny by default. `features.oidc` additionally requires RBAC and the `oidc` package extra. Configure an HTTPS `oidc.issuer`, exact `audience`, an explicit asymmetric `algorithms` allowlist, JWKS cache duration/key bound, clock skew, and tenant/organization/project claim names. `allow_insecure_http` exists only for deterministic local testing and must remain false in production. OIDC discovery/JWKS failures fail closed.
+
+For provider credential rotation, configure an ordered `credentials` list whose entries contain a non-secret `id` plus exactly one `api_key_env` or `api_key_file`. The first available credential is primary. On a non-streaming 401/403 response, the gateway tries the next available credential immediately before provider failover. Values and credential IDs are omitted from public/admin status, diagnostics, metrics, logs, and audit events. Keep the legacy single `api_key_env`/`api_key_file` form for providers that do not require overlap.
+
+`features.residency_enforcement` requires routing policy support. Set `residency.policy` to a named routing rule with at least one required residency and `fallback: deny`. The gateway always applies that rule, rejects operations/models it does not cover, and rejects attempts to select another rule. Provider `region` and `residencies` are operator assertions, not independently verified cloud-location evidence.
 
 ## Routing
 

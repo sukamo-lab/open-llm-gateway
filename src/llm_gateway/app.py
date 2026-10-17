@@ -6,6 +6,7 @@ import json
 import secrets
 import hashlib
 import logging
+import os
 import time
 from typing import Any
 import uuid
@@ -52,6 +53,44 @@ class TenantCreate(BaseModel):
     requests_per_minute: int | None = Field(default=None, gt=0)
     tokens_per_day: int | None = Field(default=None, gt=0)
     cost_per_30_days: float | None = Field(default=None, gt=0)
+    organization_id: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class NamedIdentityCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=120)
+
+
+class PrincipalCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: str = Field(pattern="^(user|service_account)$")
+    subject: str = Field(min_length=1, max_length=255)
+    display_name: str = Field(min_length=1, max_length=120)
+    project_id: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class NamedIdentityUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    active: bool | None = None
+
+    def changes(self) -> dict[str, object]:
+        values = self.model_dump(exclude_none=True)
+        if not values:
+            raise HTTPException(400, "at least one hierarchy change is required")
+        return values
+
+
+class PrincipalUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    display_name: str | None = Field(default=None, min_length=1, max_length=120)
+    active: bool | None = None
+
+    def changes(self) -> dict[str, object]:
+        values = self.model_dump(exclude_none=True)
+        if not values:
+            raise HTTPException(400, "at least one principal change is required")
+        return values
 
 
 class ModelDiscoveryRequest(BaseModel):
@@ -62,6 +101,16 @@ class ModelDiscoveryRequest(BaseModel):
 class KeyCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     expires_in_days: int | None = Field(default=None, gt=0, le=3650)
+    principal_id: str | None = Field(default=None, min_length=1, max_length=64)
+    project_id: str | None = Field(default=None, min_length=1, max_length=64)
+    permissions: list[str] | None = Field(default=None, max_length=100)
+
+
+class RoleBindingCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    principal_id: str = Field(min_length=1, max_length=64)
+    role_name: str = Field(min_length=1, max_length=64)
+    project_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class TenantUpdate(BaseModel):
@@ -70,6 +119,7 @@ class TenantUpdate(BaseModel):
     requests_per_minute: int | None = Field(default=None, gt=0)
     tokens_per_day: int | None = Field(default=None, gt=0)
     cost_per_30_days: float | None = Field(default=None, gt=0)
+    organization_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class BodyTooLarge(Exception):
@@ -143,12 +193,19 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
     reload_clients: list[httpx.AsyncClient] = []
     reload_lock = asyncio.Lock()
     reload_generation = 0
+    envelope_cipher = None
+    if config.features.envelope_encryption:
+        from .encryption import EnvelopeCipher
+
+        envelope_cipher = EnvelopeCipher.from_environment(
+            config.encryption.keys_env, config.encryption.active_key_version
+        )
     quota_enabled = bool(
         config.features.provider_quotas
         or config.features.tenant_quotas
         or config.features.usage_accounting
     )
-    identity_enabled = bool(config.features.managed_keys)
+    identity_enabled = bool(config.features.managed_keys or config.features.identity_hierarchy)
     shared_store = None
     if config.database.startswith(("postgresql://", "postgres://")) and (quota_enabled or identity_enabled):
         from .postgres import PostgresStore
@@ -160,6 +217,7 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             tenant_quotas=bool(config.features.tenant_quotas),
             accounting=bool(config.features.usage_accounting),
             cost_tracking=bool(config.features.cost_tracking),
+            rbac_enabled=bool(config.features.rbac),
         )
         quota = shared_store if quota_enabled else NullQuotaStore()
         identities = shared_store if identity_enabled else None
@@ -177,6 +235,7 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             IdentityStore(
                 config.database, config.auth.key_cache_seconds,
                 config.auth.key_cache_max_entries,
+                rbac_enabled=bool(config.features.rbac),
             ) if identity_enabled else None
         )
     metrics = (
@@ -197,7 +256,8 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         )
         idempotency_store = store_type(
             config.database, config.idempotency.ttl_seconds,
-            config.idempotency.lease_seconds,
+            config.idempotency.lease_seconds, cipher=envelope_cipher,
+            allow_plaintext_migration=config.encryption.allow_plaintext_migration,
         )
     cache_store = None
     cache_available = False
@@ -209,15 +269,21 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             cache_store = MemoryCacheStore(config.cache.ttl_seconds, config.cache.max_entries)
         elif config.cache.backend == "redis":
             cache_store = RedisCacheStore(
-                config.cache.redis_url() or "", config.cache.ttl_seconds, config.cache.redis_prefix
+                config.cache.redis_url() or "", config.cache.ttl_seconds, config.cache.redis_prefix,
+                cipher=envelope_cipher,
+                allow_plaintext_migration=config.encryption.allow_plaintext_migration,
             )
         elif config.database.startswith(("postgresql://", "postgres://")):
             cache_store = PostgresCacheStore(
-                config.database, config.cache.ttl_seconds, config.cache.max_entries
+                config.database, config.cache.ttl_seconds, config.cache.max_entries,
+                cipher=envelope_cipher,
+                allow_plaintext_migration=config.encryption.allow_plaintext_migration,
             )
         else:
             cache_store = SQLiteCacheStore(
-                config.database, config.cache.ttl_seconds, config.cache.max_entries
+                config.database, config.cache.ttl_seconds, config.cache.max_entries,
+                cipher=envelope_cipher,
+                allow_plaintext_migration=config.encryption.allow_plaintext_migration,
             )
         routing_material = {
             "paid_fallback": config.routing.paid_fallback,
@@ -313,6 +379,20 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         from .prompt_injection import PromptInjectionProcessor
 
         injection_processor = PromptInjectionProcessor(config.prompt_injection)
+    oidc_validator = None
+    if config.features.oidc:
+        from .oidc import OIDCValidator
+
+        oidc_validator = OIDCValidator(config.oidc)
+    audit_store = None
+    if config.features.audit_ledger:
+        from .audit import PostgresAuditStore, SQLiteAuditStore
+
+        audit_store = (
+            PostgresAuditStore(config.database)
+            if config.database.startswith(("postgresql://", "postgres://"))
+            else SQLiteAuditStore(config.database)
+        )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -333,6 +413,8 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                     "Exact cache initialization failed; continuing with cache disabled error_type=%s",
                     type(exc).__name__,
                 )
+        if audit_store is not None:
+            await audit_store.initialize()
         removed = await quota.cleanup(
             time.time() - config.accounting.retention_days * 86400
         )
@@ -351,6 +433,12 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             await idempotency_store.close()
         if cache_store is not None:
             await cache_store.close()
+        if oidc_validator is not None:
+            await oidc_validator.close()
+        if audit_store is not None:
+            close_audit = getattr(audit_store, "close", None)
+            if close_audit:
+                await close_audit()
         if telemetry is not None:
             try:
                 await asyncio.to_thread(telemetry.shutdown)
@@ -404,9 +492,15 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
     async def require_api(request: Request) -> AuthContext:
         existing = getattr(request.state, "auth_context", None)
         if existing is not None:
+            if config.features.rbac and "gateway.invoke" not in existing.permissions:
+                await metrics.security("rbac", "denied")
+                raise HTTPException(403, "permission denied")
             return existing
         if not config.features.authentication:
             context = AuthContext("anonymous", "anonymous")
+            if config.features.rbac:
+                await metrics.security("rbac", "denied")
+                raise HTTPException(403, "permission denied")
             request.state.auth_context = context
             request.state.tenant_id = context.tenant_id
             if config.features.structured_logging:
@@ -419,6 +513,9 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             if secrets.compare_digest(token, key):
                 identity = hashlib.sha256(key.encode()).hexdigest()[:16]
                 context = AuthContext(f"bootstrap-{identity}", f"bootstrap-{identity}")
+                if config.features.rbac:
+                    await metrics.security("rbac", "denied")
+                    raise HTTPException(403, "permission denied")
                 request.state.auth_context = context
                 request.state.tenant_id = context.tenant_id
                 if config.features.structured_logging:
@@ -429,6 +526,30 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         if config.features.managed_keys and identities is not None and token:
             context = await identities.authenticate(token)
             if context:
+                if config.features.rbac and "gateway.invoke" not in context.permissions:
+                    await metrics.security("rbac", "denied")
+                    raise HTTPException(403, "permission denied")
+                if config.features.rbac:
+                    await metrics.security("rbac", "success")
+                request.state.auth_context = context
+                request.state.tenant_id = context.tenant_id
+                if config.features.structured_logging:
+                    bind_tenant(context.tenant_id)
+                if telemetry is not None:
+                    telemetry.set_tenant(context.tenant_id)
+                return context
+        if config.features.oidc and oidc_validator is not None and identities is not None and token:
+            try:
+                identity = await oidc_validator.validate(token)
+                context = await identities.authenticate_oidc(
+                    identity.issuer, identity.subject, identity.tenant_id,
+                    identity.organization_id, identity.project_id,
+                )
+            except Exception:
+                context = None
+                await metrics.security("oidc", "denied")
+            if context and "gateway.invoke" in context.permissions:
+                await metrics.security("oidc", "success")
                 request.state.auth_context = context
                 request.state.tenant_id = context.tenant_id
                 if config.features.structured_logging:
@@ -442,8 +563,52 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         if not config.features.authentication:
             return
         expected = config.auth.admin_key()
-        if not expected or not secrets.compare_digest(bearer(request), expected):
+        if expected and secrets.compare_digest(bearer(request), expected):
+            return
+        context = getattr(request.state, "admin_auth_context", None)
+        if not config.features.rbac or context is None:
             raise HTTPException(403, "administrator credentials required")
+        path, method = request.url.path, request.method
+        if path.startswith(("/admin/audit", "/admin/usage", "/admin/encryption",
+                            "/admin/providers", "/admin/config", "/admin/model-discovery")):
+            raise HTTPException(403, "root administrator credentials required")
+        elif "/role-bindings" in path:
+            permission = "roles.read" if method == "GET" else "roles.manage"
+        elif "/principals" in path:
+            permission = "principals.read" if method == "GET" else "principals.manage"
+        elif "/projects" in path:
+            permission = "projects.read" if method == "GET" else "projects.manage"
+        elif path.startswith("/admin/organizations"):
+            if path == "/admin/organizations" and method != "GET":
+                raise HTTPException(403, "root administrator credentials required")
+            permission = "organizations.read" if method == "GET" else "organizations.manage"
+        elif "/keys" in path:
+            permission = "keys.read" if method == "GET" else ("keys.revoke" if method == "DELETE" else "keys.issue")
+        else:
+            raise HTTPException(403, "root administrator credentials required")
+        if permission not in context.permissions:
+            raise HTTPException(403, "permission denied")
+        organization_id = request.path_params.get("organization_id")
+        if organization_id and organization_id != context.organization_id:
+            raise HTTPException(403, "organization scope mismatch")
+
+    async def record_admin_event(
+        request: Request, event_type: str, tenant_id: str = "system",
+        organization_id: str | None = None, metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if audit_store is None:
+            return
+        context = getattr(request.state, "admin_auth_context", None)
+        if context is not None:
+            actor_id = f"principal:{context.principal_id}"
+        else:
+            expected = config.auth.admin_key() or "local-admin"
+            actor_id = f"admin:{hashlib.sha256(expected.encode()).hexdigest()[:16]}"
+        await audit_store.append(
+            tenant_id, actor_id, event_type, "success", organization_id,
+            {"request_id": request.state.request_id, **(metadata or {})},
+        )
+        await metrics.security("audit_append", "success")
 
     @app.middleware("http")
     async def request_context(request: Request, call_next):
@@ -500,6 +665,30 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             if context_tokens is not None:
                 end_request(context_tokens)
 
+    @app.middleware("http")
+    async def delegated_admin_auth(request: Request, call_next):
+        if (
+            config.features.rbac and identities is not None
+            and request.url.path.startswith("/admin/")
+        ):
+            token = bearer(request)
+            expected = config.auth.admin_key()
+            if token and not (expected and secrets.compare_digest(token, expected)):
+                context = await identities.authenticate(token)
+                if context is not None:
+                    request.state.admin_auth_context = context
+        response = await call_next(request)
+        if audit_store is not None and request.url.path.startswith("/admin/") and response.status_code == 403:
+            context = getattr(request.state, "admin_auth_context", None)
+            await audit_store.append(
+                getattr(context, "tenant_id", "system"),
+                f"principal:{context.principal_id}" if context else "unauthenticated",
+                "admin.denied", "denied", getattr(context, "organization_id", None),
+                {"http_method": request.method},
+            )
+            await metrics.security("admin_authorization", "denied")
+        return response
+
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
@@ -555,7 +744,14 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
     async def create_tenant(request: Request, tenant: TenantCreate) -> dict[str, object]:
         require_admin(request)
         try:
-            return await identities.create_tenant(**tenant.model_dump())
+            created = await identities.create_tenant(**tenant.model_dump())
+            await record_admin_event(
+                request, "tenant.created", str(created["id"]),
+                created.get("organization_id") if isinstance(created.get("organization_id"), str) else None,
+            )
+            return created
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
         except Exception as exc:
             if "unique" in str(exc).lower() or "duplicate key" in str(exc).lower():
                 raise HTTPException(409, "tenant name already exists") from exc
@@ -569,34 +765,285 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
     @app.patch("/admin/tenants/{tenant_id}")
     async def update_tenant(request: Request, tenant_id: str, update: TenantUpdate) -> dict[str, object]:
         require_admin(request)
-        tenant = await identities.update_tenant(tenant_id, update.model_dump(exclude_unset=True))
+        try:
+            tenant = await identities.update_tenant(tenant_id, update.model_dump(exclude_unset=True))
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
         if not tenant:
             raise HTTPException(404, "tenant not found")
+        await record_admin_event(
+            request, "tenant.updated", tenant_id,
+            tenant.get("organization_id") if isinstance(tenant.get("organization_id"), str) else None,
+            {"changed_fields": ",".join(sorted(update.model_dump(exclude_unset=True)))},
+        )
         return tenant
 
     @app.post("/admin/tenants/{tenant_id}/keys", status_code=201)
     async def issue_key(request: Request, tenant_id: str, key: KeyCreate) -> dict[str, object]:
         require_admin(request)
+        delegated = getattr(request.state, "admin_auth_context", None)
+        if delegated and await identities.tenant_organization(tenant_id) != delegated.organization_id:
+            raise HTTPException(403, "organization scope mismatch")
+        if delegated and delegated.project_id and key.project_id != delegated.project_id:
+            raise HTTPException(403, "project scope mismatch")
+        if delegated:
+            if key.permissions is None:
+                raise HTTPException(403, "delegated key issuance requires an explicit permission ceiling")
+            if not set(key.permissions) <= delegated.permissions:
+                raise HTTPException(403, "key scope exceeds issuer permissions")
         try:
-            return await identities.issue_key(tenant_id, **key.model_dump())
+            issued = await identities.issue_key(tenant_id, **key.model_dump())
+            await record_admin_event(
+                request, "key.issued", tenant_id, metadata={"key_id": str(issued["id"])},
+            )
+            return issued
         except KeyError as exc:
             raise HTTPException(404, str(exc)) from exc
+        except (ValueError, PermissionError) as exc:
+            raise HTTPException(403, str(exc)) from exc
 
     @app.get("/admin/tenants/{tenant_id}/keys")
     async def list_keys(request: Request, tenant_id: str) -> list[dict[str, object]]:
         require_admin(request)
-        return await identities.list_keys(tenant_id)
+        delegated = getattr(request.state, "admin_auth_context", None)
+        if delegated and await identities.tenant_organization(tenant_id) != delegated.organization_id:
+            raise HTTPException(403, "organization scope mismatch")
+        return await identities.list_keys(tenant_id, delegated.project_id if delegated else None)
 
     @app.delete("/admin/keys/{key_id}", status_code=204)
     async def revoke_key(request: Request, key_id: str) -> None:
         require_admin(request)
+        delegated = getattr(request.state, "admin_auth_context", None)
+        if delegated:
+            organization_id, project_id = await identities.key_scope(key_id)
+            if organization_id != delegated.organization_id:
+                raise HTTPException(403, "organization scope mismatch")
+            if delegated.project_id and project_id != delegated.project_id:
+                raise HTTPException(403, "project scope mismatch")
         if not await identities.revoke_key(key_id):
             raise HTTPException(404, "key not found")
+        await record_admin_event(request, "key.revoked", metadata={"key_id": key_id})
+
+    @app.post("/admin/organizations", status_code=201)
+    async def create_organization(request: Request, body: NamedIdentityCreate) -> dict[str, object]:
+        require_admin(request)
+        try:
+            created = await identities.create_organization(body.name)
+            await record_admin_event(request, "organization.created", organization_id=str(created["id"]))
+            return created
+        except Exception as exc:
+            if "unique" in str(exc).lower() or "duplicate key" in str(exc).lower():
+                raise HTTPException(409, "organization name already exists") from exc
+            raise
+
+    @app.get("/admin/organizations")
+    async def list_organizations(request: Request) -> list[dict[str, object]]:
+        require_admin(request)
+        delegated = getattr(request.state, "admin_auth_context", None)
+        return await identities.list_organizations(delegated.organization_id if delegated else None)
+
+    @app.patch("/admin/organizations/{organization_id}")
+    async def update_organization(
+        request: Request, organization_id: str, body: NamedIdentityUpdate,
+    ) -> dict[str, object]:
+        require_admin(request)
+        changes = body.changes()
+        item = await identities.update_organization(organization_id, changes)
+        if not item:
+            raise HTTPException(404, "organization not found")
+        await record_admin_event(request, "organization.updated", organization_id=organization_id,
+                                 metadata={"changed_fields": ",".join(sorted(changes))})
+        return item
+
+    @app.post("/admin/organizations/{organization_id}/projects", status_code=201)
+    async def create_project(
+        request: Request, organization_id: str, body: NamedIdentityCreate,
+    ) -> dict[str, object]:
+        require_admin(request)
+        try:
+            created = await identities.create_project(organization_id, body.name)
+            await record_admin_event(request, "project.created", organization_id=organization_id,
+                                     metadata={"project_id": str(created["id"])})
+            return created
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.get("/admin/organizations/{organization_id}/projects")
+    async def list_projects(request: Request, organization_id: str) -> list[dict[str, object]]:
+        require_admin(request)
+        return await identities.list_projects(organization_id)
+
+    @app.patch("/admin/organizations/{organization_id}/projects/{project_id}")
+    async def update_project(
+        request: Request, organization_id: str, project_id: str, body: NamedIdentityUpdate,
+    ) -> dict[str, object]:
+        require_admin(request)
+        changes = body.changes()
+        item = await identities.update_project(organization_id, project_id, changes)
+        if not item:
+            raise HTTPException(404, "project not found")
+        await record_admin_event(request, "project.updated", organization_id=organization_id,
+                                 metadata={"project_id": project_id,
+                                           "changed_fields": ",".join(sorted(changes))})
+        return item
+
+    @app.post("/admin/organizations/{organization_id}/principals", status_code=201)
+    async def create_principal(
+        request: Request, organization_id: str, body: PrincipalCreate,
+    ) -> dict[str, object]:
+        require_admin(request)
+        delegated = getattr(request.state, "admin_auth_context", None)
+        if delegated and delegated.project_id and body.project_id != delegated.project_id:
+            raise HTTPException(403, "project scope mismatch")
+        try:
+            created = await identities.create_principal(organization_id, **body.model_dump())
+            await record_admin_event(request, "principal.created", organization_id=organization_id,
+                                     metadata={"principal_id": str(created["id"]), "kind": body.kind})
+            return created
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.get("/admin/organizations/{organization_id}/principals")
+    async def list_principals(request: Request, organization_id: str) -> list[dict[str, object]]:
+        require_admin(request)
+        delegated = getattr(request.state, "admin_auth_context", None)
+        return await identities.list_principals(
+            organization_id, delegated.project_id if delegated else None
+        )
+
+    @app.patch("/admin/organizations/{organization_id}/principals/{principal_id}")
+    async def update_principal(
+        request: Request, organization_id: str, principal_id: str, body: PrincipalUpdate,
+    ) -> dict[str, object]:
+        require_admin(request)
+        delegated = getattr(request.state, "admin_auth_context", None)
+        if delegated and delegated.project_id:
+            if await identities.principal_project(principal_id) != delegated.project_id:
+                raise HTTPException(403, "project scope mismatch")
+        changes = body.changes()
+        item = await identities.update_principal(organization_id, principal_id, changes)
+        if not item:
+            raise HTTPException(404, "principal not found")
+        await record_admin_event(request, "principal.updated", organization_id=organization_id,
+                                 metadata={"principal_id": principal_id,
+                                           "changed_fields": ",".join(sorted(changes))})
+        return item
+
+    @app.post("/admin/organizations/{organization_id}/role-bindings", status_code=201)
+    async def assign_role(
+        request: Request, organization_id: str, body: RoleBindingCreate,
+    ) -> dict[str, object]:
+        require_admin(request)
+        delegated = getattr(request.state, "admin_auth_context", None)
+        if delegated:
+            from .authorization import BUILTIN_ROLES
+
+            granted = BUILTIN_ROLES.get(body.role_name)
+            if granted is None:
+                raise HTTPException(400, "unknown role")
+            if not granted <= delegated.permissions:
+                raise HTTPException(403, "role assignment exceeds issuer permissions")
+        try:
+            created = await identities.assign_role(organization_id, **body.model_dump())
+            await record_admin_event(request, "role.assigned", organization_id=organization_id,
+                                     metadata={"binding_id": str(created["id"]),
+                                               "role_name": body.role_name,
+                                               "principal_id": body.principal_id})
+            return created
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.get("/admin/organizations/{organization_id}/role-bindings")
+    async def list_role_bindings(request: Request, organization_id: str) -> list[dict[str, object]]:
+        require_admin(request)
+        return await identities.list_role_bindings(organization_id)
+
+    @app.delete("/admin/organizations/{organization_id}/role-bindings/{binding_id}", status_code=204)
+    async def revoke_role_binding(request: Request, organization_id: str, binding_id: str) -> None:
+        require_admin(request)
+        if not await identities.revoke_role_binding(organization_id, binding_id):
+            raise HTTPException(404, "role binding not found")
+        await record_admin_event(request, "role.revoked", organization_id=organization_id,
+                                 metadata={"binding_id": binding_id})
 
     @app.get("/admin/providers")
     async def providers(request: Request) -> list[dict[str, Any]]:
         require_admin(request)
         return request.app.state.router.status()
+
+    @app.get("/admin/audit/events")
+    async def audit_events(request: Request, after: int = 0, limit: int = 100) -> list[dict[str, Any]]:
+        require_admin(request)
+        bounded = min(max(limit, 1), config.audit.read_max_events)
+        return await audit_store.read_after(max(after, 0), bounded)
+
+    @app.get("/admin/audit/verify")
+    async def audit_verify(request: Request) -> dict[str, Any]:
+        require_admin(request)
+        valid, sequence, last_hash = await audit_store.verify()
+        if not valid:
+            raise HTTPException(409, "audit chain verification failed")
+        return {"valid": True, "sequence": sequence, "last_hash": last_hash}
+
+    @app.post("/admin/audit/export")
+    async def audit_export(request: Request) -> dict[str, Any]:
+        require_admin(request)
+        if not config.audit.export_url:
+            raise HTTPException(409, "audit export URL is not configured")
+        token = os.getenv(config.audit.export_token_env, "") if config.audit.export_token_env else ""
+
+        async def sink(events: list[dict[str, Any]]) -> None:
+            headers = {"Idempotency-Key": events[-1]["event_hash"]}
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            async with httpx.AsyncClient(timeout=config.audit.export_timeout_seconds) as client:
+                response = await client.post(config.audit.export_url, json={"events": events}, headers=headers)
+                response.raise_for_status()
+
+        try:
+            count = await audit_store.export("default", config.audit.export_batch_size, sink)
+        except Exception as exc:
+            await metrics.security("audit_export", "failure")
+            raise HTTPException(502, "audit export failed; checkpoint was not advanced") from exc
+        await metrics.security("audit_export", "success")
+        return {"exported": count, "sink_id": "default"}
+
+    @app.post("/admin/encryption/rotate")
+    async def rotate_encryption(request: Request) -> dict[str, Any]:
+        require_admin(request)
+        from .encryption import rotate_postgres, rotate_sqlite
+
+        try:
+            if config.database.startswith(("postgresql://", "postgres://")):
+                pool = next((
+                    getattr(store, "pool", None)
+                    for store in (shared_store, idempotency_store, cache_store)
+                    if store is not None and getattr(store, "pool", None) is not None
+                ), None)
+                if pool is None:
+                    return {"rotated": 0, "active_key_version": envelope_cipher.active_version}
+                result = await rotate_postgres(
+                    pool, envelope_cipher, config.encryption.rotation_batch_size,
+                    config.encryption.allow_plaintext_migration,
+                )
+            else:
+                result = await asyncio.to_thread(
+                    rotate_sqlite, config.database, envelope_cipher,
+                    config.encryption.rotation_batch_size,
+                    config.encryption.allow_plaintext_migration,
+                )
+        except Exception as exc:
+            await metrics.security("encryption_rotation", "failure")
+            raise HTTPException(409, "encryption rotation failed; batch was rolled back") from exc
+        await metrics.security("encryption_rotation", "success")
+        await record_admin_event(
+            request, "encryption.rotated",
+            metadata={"records_rotated": result["rotated"],
+                      "active_key_version": envelope_cipher.active_version},
+        )
+        return {**result, "active_key_version": envelope_cipher.active_version}
 
     @app.get("/admin/config/diagnostics")
     async def config_diagnostics(request: Request) -> dict[str, object]:
@@ -1303,6 +1750,11 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                 route.path for route in app.routes
                 if getattr(route, "path", "").startswith(("/admin/tenants", "/admin/keys"))
             )
+        if not config.features.identity_hierarchy:
+            disabled_paths.update(
+                route.path for route in app.routes
+                if getattr(route, "path", "").startswith("/admin/organizations")
+            )
         if not config.features.usage_accounting:
             disabled_paths.update({"/admin/usage", "/admin/usage/tenants"})
         if not config.features.managed_keys or not config.features.tenant_quotas:
@@ -1321,6 +1773,13 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         disabled_paths.add("/v1/images/generations")
     if not config.features.model_discovery:
         disabled_paths.add("/admin/model-discovery")
+    if not config.features.audit_ledger:
+        disabled_paths.update(
+            route.path for route in app.routes
+            if getattr(route, "path", "").startswith("/admin/audit")
+        )
+    if not config.features.envelope_encryption:
+        disabled_paths.add("/admin/encryption/rotate")
     app.router.routes = [
         route for route in app.router.routes
         if getattr(route, "path", None) not in disabled_paths

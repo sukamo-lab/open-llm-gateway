@@ -42,7 +42,10 @@ def test_chat_idempotency_replays_without_second_upstream_call(tmp_path, monkeyp
     )
     calls = 0
 
-    async def complete(_router, _payload, _consumer_id=None, _consumer_limits=()):
+    async def complete(
+        _router, _payload, _consumer_id=None, _consumer_limits=(),
+        _require_injection_safe=False,
+    ):
         nonlocal calls
         calls += 1
         return {"id": "one", "choices": [], "_gateway_meta": {}}, "p", "model"

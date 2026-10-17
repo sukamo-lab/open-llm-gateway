@@ -29,6 +29,13 @@ All notable product changes are recorded here. The project follows [Semantic Ver
 - Deadline-aware streaming retries before the first SSE byte, with explicit termination instead of mixed-provider output after a stream starts.
 - Opt-in declarative routing policies for tier, provider, region, residency, quality, and explicit fallback behavior.
 - Administrator-triggered atomic routing/provider configuration reload with last-known-good rollback.
+- Opt-in organization, project, user, and service-account hierarchy with versioned SQLite/PostgreSQL storage.
+- Opt-in deny-by-default RBAC with principal-bound, project-scoped API keys and permission ceilings.
+- Opt-in fail-closed OIDC discovery/JWT validation with bounded JWKS rotation and brokered SAML guidance.
+- Opt-in append-only hash-chained audit events with corruption verification and checkpointed replayable HTTP export.
+- Opt-in versioned AES-GCM envelope encryption for persisted cache/idempotency responses with resumable rotation.
+- Ordered overlapping provider credential references with safe non-streaming 401/403 fallback during rotation.
+- Enforceable named residency routing policy with denied fallback and override-bypass prevention.
 
 ## [0.5.0] - 2026-10-13
 

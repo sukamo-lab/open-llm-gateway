@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-LATEST_VERSIONS = {"usage": 1, "identity": 1, "idempotency": 1, "cache": 1}
+LATEST_VERSIONS = {"usage": 1, "identity": 3, "idempotency": 1, "cache": 1, "audit": 1}
 
 
 def _validate_components(components: Iterable[str]) -> tuple[str, ...]:
@@ -78,6 +78,59 @@ def _sqlite_identity_v1(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE consumer_keys ADD COLUMN expires_at REAL")
 
 
+def _sqlite_identity_v2(db: sqlite3.Connection) -> None:
+    db.execute("PRAGMA foreign_keys=ON")
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS organizations (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, active INTEGER NOT NULL DEFAULT 1,
+        created_at REAL NOT NULL)"""
+    )
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS projects (
+        id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, name TEXT NOT NULL,
+        active INTEGER NOT NULL DEFAULT 1, created_at REAL NOT NULL,
+        UNIQUE(organization_id,name),
+        FOREIGN KEY(organization_id) REFERENCES organizations(id))"""
+    )
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS principals (
+        id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, project_id TEXT,
+        kind TEXT NOT NULL CHECK(kind IN ('user','service_account')),
+        subject TEXT NOT NULL, display_name TEXT NOT NULL,
+        active INTEGER NOT NULL DEFAULT 1, created_at REAL NOT NULL,
+        UNIQUE(organization_id,kind,subject),
+        FOREIGN KEY(organization_id) REFERENCES organizations(id),
+        FOREIGN KEY(project_id) REFERENCES projects(id))"""
+    )
+    tenant_columns = {row[1] for row in db.execute("PRAGMA table_info(tenants)")}
+    if "organization_id" not in tenant_columns:
+        db.execute("ALTER TABLE tenants ADD COLUMN organization_id TEXT")
+    db.execute("CREATE INDEX IF NOT EXISTS projects_organization ON projects(organization_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS principals_organization ON principals(organization_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS principals_project ON principals(project_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS tenants_organization ON tenants(organization_id)")
+
+
+def _sqlite_identity_v3(db: sqlite3.Connection) -> None:
+    columns = {row[1] for row in db.execute("PRAGMA table_info(consumer_keys)")}
+    for column, definition in {
+        "principal_id": "TEXT", "project_id": "TEXT", "permission_ceiling": "TEXT",
+    }.items():
+        if column not in columns:
+            db.execute(f"ALTER TABLE consumer_keys ADD COLUMN {column} {definition}")
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS role_bindings (
+        id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, principal_id TEXT NOT NULL,
+        role_name TEXT NOT NULL, project_id TEXT, created_at REAL NOT NULL,
+        UNIQUE(principal_id,role_name,project_id),
+        FOREIGN KEY(organization_id) REFERENCES organizations(id),
+        FOREIGN KEY(principal_id) REFERENCES principals(id),
+        FOREIGN KEY(project_id) REFERENCES projects(id))"""
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS role_bindings_principal ON role_bindings(principal_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS consumer_keys_principal ON consumer_keys(principal_id)")
+
+
 def _sqlite_idempotency_v1(db: sqlite3.Connection) -> None:
     db.execute(
         """CREATE TABLE IF NOT EXISTS idempotency_records (
@@ -104,11 +157,36 @@ def _sqlite_cache_v1(db: sqlite3.Connection) -> None:
     db.execute("CREATE INDEX IF NOT EXISTS exact_cache_created ON exact_cache_entries(created_at)")
 
 
+def _sqlite_audit_v1(db: sqlite3.Connection) -> None:
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS audit_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT, tenant_id TEXT NOT NULL,
+        organization_id TEXT, actor_id TEXT NOT NULL, event_type TEXT NOT NULL,
+        outcome TEXT NOT NULL, metadata_json TEXT NOT NULL, created_at REAL NOT NULL,
+        previous_hash TEXT NOT NULL, event_hash TEXT NOT NULL UNIQUE)"""
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS audit_tenant_sequence ON audit_events(tenant_id,sequence)")
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS audit_export_checkpoints (
+        sink_id TEXT PRIMARY KEY, sequence INTEGER NOT NULL, event_hash TEXT NOT NULL,
+        updated_at REAL NOT NULL)"""
+    )
+    db.execute(
+        """CREATE TRIGGER IF NOT EXISTS audit_events_no_update
+        BEFORE UPDATE ON audit_events BEGIN SELECT RAISE(ABORT,'audit events are append-only'); END"""
+    )
+    db.execute(
+        """CREATE TRIGGER IF NOT EXISTS audit_events_no_delete
+        BEFORE DELETE ON audit_events BEGIN SELECT RAISE(ABORT,'audit events are append-only'); END"""
+    )
+
+
 SQLITE_MIGRATIONS = {
     "usage": {1: _sqlite_usage_v1},
-    "identity": {1: _sqlite_identity_v1},
+    "identity": {1: _sqlite_identity_v1, 2: _sqlite_identity_v2, 3: _sqlite_identity_v3},
     "idempotency": {1: _sqlite_idempotency_v1},
     "cache": {1: _sqlite_cache_v1},
+    "audit": {1: _sqlite_audit_v1},
 }
 
 
@@ -235,6 +313,45 @@ async def _postgres_migration(db, component: str, version: int) -> None:
             CREATE INDEX IF NOT EXISTS consumer_keys_hash ON consumer_keys(key_hash);
             CREATE INDEX IF NOT EXISTS consumer_keys_tenant ON consumer_keys(tenant_id);"""
         )
+    elif (component, version) == ("identity", 2):
+        await db.execute(
+            """CREATE TABLE IF NOT EXISTS organizations (
+              id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE,
+              active BOOLEAN NOT NULL DEFAULT TRUE, created_at DOUBLE PRECISION NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS projects (
+              id TEXT PRIMARY KEY, organization_id TEXT NOT NULL REFERENCES organizations(id),
+              name TEXT NOT NULL, active BOOLEAN NOT NULL DEFAULT TRUE,
+              created_at DOUBLE PRECISION NOT NULL, UNIQUE(organization_id,name)
+            );
+            CREATE TABLE IF NOT EXISTS principals (
+              id TEXT PRIMARY KEY, organization_id TEXT NOT NULL REFERENCES organizations(id),
+              project_id TEXT REFERENCES projects(id), kind TEXT NOT NULL,
+              subject TEXT NOT NULL, display_name TEXT NOT NULL,
+              active BOOLEAN NOT NULL DEFAULT TRUE, created_at DOUBLE PRECISION NOT NULL,
+              UNIQUE(organization_id,kind,subject),
+              CHECK(kind IN ('user','service_account'))
+            );
+            ALTER TABLE tenants ADD COLUMN IF NOT EXISTS organization_id TEXT REFERENCES organizations(id);
+            CREATE INDEX IF NOT EXISTS projects_organization ON projects(organization_id);
+            CREATE INDEX IF NOT EXISTS principals_organization ON principals(organization_id);
+            CREATE INDEX IF NOT EXISTS principals_project ON principals(project_id);
+            CREATE INDEX IF NOT EXISTS tenants_organization ON tenants(organization_id);"""
+        )
+    elif (component, version) == ("identity", 3):
+        await db.execute(
+            """ALTER TABLE consumer_keys ADD COLUMN IF NOT EXISTS principal_id TEXT REFERENCES principals(id);
+            ALTER TABLE consumer_keys ADD COLUMN IF NOT EXISTS project_id TEXT REFERENCES projects(id);
+            ALTER TABLE consumer_keys ADD COLUMN IF NOT EXISTS permission_ceiling TEXT;
+            CREATE TABLE IF NOT EXISTS role_bindings (
+              id TEXT PRIMARY KEY, organization_id TEXT NOT NULL REFERENCES organizations(id),
+              principal_id TEXT NOT NULL REFERENCES principals(id), role_name TEXT NOT NULL,
+              project_id TEXT REFERENCES projects(id), created_at DOUBLE PRECISION NOT NULL,
+              UNIQUE(principal_id,role_name,project_id)
+            );
+            CREATE INDEX IF NOT EXISTS role_bindings_principal ON role_bindings(principal_id);
+            CREATE INDEX IF NOT EXISTS consumer_keys_principal ON consumer_keys(principal_id);"""
+        )
     elif (component, version) == ("idempotency", 1):
         await db.execute(
             """CREATE TABLE IF NOT EXISTS idempotency_records (
@@ -261,6 +378,26 @@ async def _postgres_migration(db, component: str, version: int) -> None:
               ON exact_cache_entries(expires_at);
             CREATE INDEX IF NOT EXISTS exact_cache_created
               ON exact_cache_entries(created_at);"""
+        )
+    elif (component, version) == ("audit", 1):
+        await db.execute(
+            """CREATE TABLE IF NOT EXISTS audit_events (
+              sequence BIGSERIAL PRIMARY KEY, tenant_id TEXT NOT NULL,
+              organization_id TEXT, actor_id TEXT NOT NULL, event_type TEXT NOT NULL,
+              outcome TEXT NOT NULL, metadata_json TEXT NOT NULL,
+              created_at DOUBLE PRECISION NOT NULL, previous_hash TEXT NOT NULL,
+              event_hash TEXT NOT NULL UNIQUE
+            );
+            CREATE INDEX IF NOT EXISTS audit_tenant_sequence ON audit_events(tenant_id,sequence);
+            CREATE TABLE IF NOT EXISTS audit_export_checkpoints (
+              sink_id TEXT PRIMARY KEY, sequence BIGINT NOT NULL, event_hash TEXT NOT NULL,
+              updated_at DOUBLE PRECISION NOT NULL
+            );
+            CREATE OR REPLACE FUNCTION reject_audit_mutation() RETURNS trigger AS $$
+            BEGIN RAISE EXCEPTION 'audit events are append-only'; END; $$ LANGUAGE plpgsql;
+            DROP TRIGGER IF EXISTS audit_events_no_update ON audit_events;
+            CREATE TRIGGER audit_events_no_update BEFORE UPDATE OR DELETE ON audit_events
+              FOR EACH ROW EXECUTE FUNCTION reject_audit_mutation();"""
         )
     else:
         raise RuntimeError(f"missing PostgreSQL migration {component} version {version}")

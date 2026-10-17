@@ -17,6 +17,7 @@ async def test_metrics_render_histograms_and_bounded_labels():
     await metrics.pii("input", "redact", "matched")
     await metrics.moderation("input", "block", "blocked")
     await metrics.prompt_injection("route", "risky")
+    await metrics.security("rbac", "denied")
     rendered = await metrics.render()
 
     escaped_endpoint = 'endpoint="/v1/\\"chat\\"\\n"'
@@ -30,6 +31,7 @@ async def test_metrics_render_histograms_and_bounded_labels():
     assert 'llm_gateway_pii_events_total{stage="input",action="redact",outcome="matched"} 1' in rendered
     assert 'llm_gateway_moderation_events_total{stage="input",action="block",outcome="blocked"} 1' in rendered
     assert 'llm_gateway_prompt_injection_events_total{action="route",outcome="risky"} 1' in rendered
+    assert 'llm_gateway_security_events_total{control="rbac",outcome="denied"} 1' in rendered
     assert f"llm_gateway_http_request_duration_seconds_bucket{{{escaped_endpoint},le=\"0.1\"}} 0" in rendered
     assert f"llm_gateway_http_request_duration_seconds_bucket{{{escaped_endpoint},le=\"1\"}} 1" in rendered
     assert f"llm_gateway_http_request_duration_seconds_bucket{{{escaped_endpoint},le=\"+Inf\"}} 1" in rendered

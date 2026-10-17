@@ -66,10 +66,15 @@ class MemoryCacheStore:
 
 
 class SQLiteCacheStore:
-    def __init__(self, database: str, ttl_seconds: int, max_entries: int):
+    def __init__(
+        self, database: str, ttl_seconds: int, max_entries: int,
+        cipher=None, allow_plaintext_migration: bool = False,
+    ):
         self.database = database
         self.ttl_seconds = ttl_seconds
         self.max_entries = max_entries
+        self.cipher = cipher
+        self.allow_plaintext_migration = allow_plaintext_migration
         self._lock = asyncio.Lock()
 
     def _connect(self) -> sqlite3.Connection:
@@ -102,8 +107,14 @@ class SQLiteCacheStore:
             ).fetchone()
         if not row:
             return None
+        value = row["response_json"]
+        if self.cipher:
+            if value.startswith("enc:v1:"):
+                value = self.cipher.decrypt(value, f"cache:{tenant_id}:{key}")
+            elif not self.allow_plaintext_migration:
+                raise RuntimeError("unencrypted cache response requires migration")
         try:
-            return CacheEntry(json.loads(row["response_json"]), float(row["created_at"]))
+            return CacheEntry(json.loads(value), float(row["created_at"]))
         except (TypeError, ValueError):
             return None
 
@@ -113,6 +124,8 @@ class SQLiteCacheStore:
 
     def _put(self, tenant_id: str, key: str, response_json: str) -> None:
         now = time.time()
+        if self.cipher:
+            response_json = self.cipher.encrypt(response_json, f"cache:{tenant_id}:{key}")
         with self._connect() as db:
             db.execute(
                 """INSERT INTO exact_cache_entries
@@ -138,10 +151,15 @@ class SQLiteCacheStore:
 
 
 class PostgresCacheStore:
-    def __init__(self, dsn: str, ttl_seconds: int, max_entries: int):
+    def __init__(
+        self, dsn: str, ttl_seconds: int, max_entries: int,
+        cipher=None, allow_plaintext_migration: bool = False,
+    ):
         self.dsn = dsn
         self.ttl_seconds = ttl_seconds
         self.max_entries = max_entries
+        self.cipher = cipher
+        self.allow_plaintext_migration = allow_plaintext_migration
         self.pool = None
 
     async def initialize(self) -> None:
@@ -160,14 +178,22 @@ class PostgresCacheStore:
         )
         if not row:
             return None
+        value = row["response_json"]
+        if self.cipher:
+            if value.startswith("enc:v1:"):
+                value = self.cipher.decrypt(value, f"cache:{tenant_id}:{key}")
+            elif not self.allow_plaintext_migration:
+                raise RuntimeError("unencrypted cache response requires migration")
         try:
-            return CacheEntry(json.loads(row["response_json"]), float(row["created_at"]))
+            return CacheEntry(json.loads(value), float(row["created_at"]))
         except (TypeError, ValueError):
             return None
 
     async def put(self, tenant_id: str, key: str, response_json: str) -> None:
         assert self.pool
         now = time.time()
+        if self.cipher:
+            response_json = self.cipher.encrypt(response_json, f"cache:{tenant_id}:{key}")
         async with self.pool.acquire() as db, db.transaction():
             await db.execute(
                 """INSERT INTO exact_cache_entries
@@ -195,11 +221,16 @@ class PostgresCacheStore:
 
 
 class RedisCacheStore:
-    def __init__(self, url: str, ttl_seconds: int, prefix: str):
+    def __init__(
+        self, url: str, ttl_seconds: int, prefix: str,
+        cipher=None, allow_plaintext_migration: bool = False,
+    ):
         self.url = url
         self.ttl_seconds = ttl_seconds
         self.prefix = prefix
         self.client = None
+        self.cipher = cipher
+        self.allow_plaintext_migration = allow_plaintext_migration
 
     async def initialize(self) -> None:
         from redis.asyncio import from_url
@@ -215,6 +246,11 @@ class RedisCacheStore:
         value = await self.client.get(self._key(tenant_id, key))
         if not value:
             return None
+        if self.cipher:
+            if value.startswith("enc:v1:"):
+                value = self.cipher.decrypt(value, f"cache:{tenant_id}:{key}")
+            elif not self.allow_plaintext_migration:
+                raise RuntimeError("unencrypted cache response requires migration")
         try:
             envelope = json.loads(value)
             return CacheEntry(envelope["response"], float(envelope["created_at"]))
@@ -227,6 +263,8 @@ class RedisCacheStore:
             {"created_at": now, "response": json.loads(response_json)},
             ensure_ascii=False, separators=(",", ":"),
         )
+        if self.cipher:
+            envelope = self.cipher.encrypt(envelope, f"cache:{tenant_id}:{key}")
         await self.client.set(self._key(tenant_id, key), envelope, ex=self.ttl_seconds)
 
     async def close(self) -> None:

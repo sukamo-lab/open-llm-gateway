@@ -3,6 +3,114 @@ from fastapi.testclient import TestClient
 from llm_gateway.app import create_app
 
 
+def test_identity_hierarchy_routes_are_feature_flagged_and_tenant_isolated(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_GATEWAY_ADMIN_KEY", "a" * 32)
+    monkeypatch.setenv("PROVIDER_KEY", "secret")
+    base = (
+        f"database: {str(tmp_path / 'identity.db')!s}\n"
+        "mode: multi\nfeatures:\n  identity_hierarchy: ENABLED\n"
+        "providers:\n  - name: p\n    base_url: https://example.test/v1\n"
+        "    api_key_env: PROVIDER_KEY\n    models:\n"
+        "      - {name: fast, upstream_model: model}\n"
+    )
+    config = tmp_path / "hierarchy.yaml"
+    config.write_text(base.replace("ENABLED", "false"), encoding="utf-8")
+    with TestClient(create_app(str(config)), raise_server_exceptions=False) as client:
+        assert client.get("/admin/organizations").status_code == 404
+
+    config.write_text(base.replace("ENABLED", "true"), encoding="utf-8")
+    headers = {"Authorization": f"Bearer {'a' * 32}"}
+    with TestClient(create_app(str(config)), raise_server_exceptions=False) as client:
+        first = client.post("/admin/organizations", json={"name": "first"}, headers=headers)
+        second = client.post("/admin/organizations", json={"name": "second"}, headers=headers)
+        assert first.status_code == second.status_code == 201
+        project = client.post(
+            f"/admin/organizations/{first.json()['id']}/projects",
+            json={"name": "production"}, headers=headers,
+        )
+        assert project.status_code == 201
+        renamed = client.patch(
+            f"/admin/organizations/{first.json()['id']}/projects/{project.json()['id']}",
+            json={"name": "production-renamed"}, headers=headers,
+        )
+        assert renamed.status_code == 200
+        assert renamed.json()["name"] == "production-renamed"
+        crossed = client.post(
+            f"/admin/organizations/{second.json()['id']}/principals",
+            json={"kind": "user", "subject": "mallory", "display_name": "Mallory",
+                  "project_id": project.json()["id"]},
+            headers=headers,
+        )
+        assert crossed.status_code == 404
+
+
+def test_delegated_rbac_cannot_escalate_roles_or_key_scope(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_GATEWAY_ADMIN_KEY", "a" * 32)
+    monkeypatch.setenv("PROVIDER_KEY", "secret")
+    config = tmp_path / "rbac.yaml"
+    config.write_text(
+        f"mode: multi\ndatabase: {tmp_path / 'rbac.db'}\n"
+        "features:\n  identity_hierarchy: true\n  rbac: true\n  audit_ledger: true\n"
+        "providers:\n  - name: p\n    base_url: https://example.test/v1\n"
+        "    api_key_env: PROVIDER_KEY\n    models:\n"
+        "      - {name: fast, upstream_model: model}\n",
+        encoding="utf-8",
+    )
+    root = {"Authorization": f"Bearer {'a' * 32}"}
+    with TestClient(create_app(str(config)), raise_server_exceptions=False) as client:
+        organization = client.post(
+            "/admin/organizations", json={"name": "org"}, headers=root
+        ).json()
+        principal = client.post(
+            f"/admin/organizations/{organization['id']}/principals",
+            json={"kind": "service_account", "subject": "admin", "display_name": "Admin"},
+            headers=root,
+        ).json()
+        binding = client.post(
+            f"/admin/organizations/{organization['id']}/role-bindings",
+            json={"principal_id": principal["id"], "role_name": "organization_admin"}, headers=root,
+        ).json()
+        tenant = client.post(
+            "/admin/tenants", json={"name": "tenant", "organization_id": organization["id"]},
+            headers=root,
+        ).json()
+        issued = client.post(
+            f"/admin/tenants/{tenant['id']}/keys",
+            json={"name": "admin", "principal_id": principal["id"]}, headers=root,
+        ).json()
+        delegated = {"Authorization": f"Bearer {issued['api_key']}"}
+
+        escalation = client.post(
+            f"/admin/organizations/{organization['id']}/role-bindings",
+            json={"principal_id": principal["id"], "role_name": "security_admin"},
+            headers=delegated,
+        )
+        assert escalation.status_code == 403
+        unbounded = client.post(
+            f"/admin/tenants/{tenant['id']}/keys",
+            json={"name": "unbounded", "principal_id": principal["id"]}, headers=delegated,
+        )
+        assert unbounded.status_code == 403
+        excessive = client.post(
+            f"/admin/tenants/{tenant['id']}/keys",
+            json={"name": "excessive", "principal_id": principal["id"],
+                  "permissions": ["encryption.rotate"]}, headers=delegated,
+        )
+        assert excessive.status_code == 403
+        revoked = client.delete(
+            f"/admin/organizations/{organization['id']}/role-bindings/{binding['id']}",
+            headers=root,
+        )
+        assert revoked.status_code == 204
+        denied_after_revocation = client.get(
+            f"/admin/organizations/{organization['id']}/projects", headers=delegated,
+        )
+        assert denied_after_revocation.status_code == 403
+        audit = client.get("/admin/audit/events", headers=root)
+        assert audit.status_code == 200
+        assert any(event["event_type"] == "admin.denied" for event in audit.json())
+
+
 def test_config_reload_is_atomic_and_feature_flagged(tmp_path, monkeypatch):
     monkeypatch.setenv("PROVIDER_KEY", "secret")
     disabled = tmp_path / "disabled-reload.yaml"

@@ -15,7 +15,7 @@ from typing import Any, AsyncIterator
 import httpx
 
 from .config import GatewayConfig, ModelConfig, ProviderConfig, RoutingPolicyConfig
-from .quota import QuotaStore, Reservation
+from .quota import QuotaStore
 from .metrics import Metrics
 
 
@@ -171,7 +171,16 @@ class GatewayRouter:
             return candidates, None
         policies = self.config.routing.policies
         policy = None
-        if requested_policy is not None:
+        if self.config.features.residency_enforcement:
+            enforced_name = self.config.residency.policy
+            if requested_policy is not None and requested_policy != enforced_name:
+                raise NoModelAvailable("routing policy override cannot bypass residency enforcement")
+            policy = next(item for item in policies if item.name == enforced_name)
+            if operation not in policy.operations or (
+                "*" not in policy.models and requested_model not in policy.models
+            ):
+                raise NoModelAvailable("enforced residency policy does not cover this request")
+        elif requested_policy is not None:
             if not self.config.routing.allow_policy_override:
                 raise NoModelAvailable("routing policy override is disabled")
             policy = next((item for item in policies if item.name == requested_policy), None)
@@ -876,7 +885,12 @@ class GatewayRouter:
             started = time.monotonic()
             deadline = started + routing.request_deadline_seconds if routing.request_deadline_seconds else None
             candidate_failed = False
-            for attempt in range(1, routing.retry_attempts + 1):
+            credentials = candidate.provider.credential_values()
+            if not credentials:
+                credentials = [("legacy", candidate.provider.api_key() or "")]
+            credential_index = 0
+            max_upstream_rounds = routing.retry_attempts + len(credentials) - 1
+            for attempt in range(1, max_upstream_rounds + 1):
                 remaining = deadline - time.monotonic() if deadline else None
                 if remaining is not None and remaining <= 0:
                     candidate_failed = True
@@ -898,11 +912,22 @@ class GatewayRouter:
                     async with self.client.stream(
                         "POST",
                         self._url(candidate.provider),
-                        headers=self._headers(candidate.provider),
+                        headers=self._headers(candidate.provider, credentials[credential_index][1]),
                         json=self._upstream_payload(candidate, payload, stream=True),
                         timeout=timeout,
                     ) as response:
-                        if response.status_code in RETRY_STATUS and attempt < routing.retry_attempts:
+                        if response.status_code in {401, 403} and credential_index < len(credentials) - 1:
+                            await response.aread()
+                            if trace_handle is not None:
+                                self.telemetry.finish_provider(trace_handle, status_code=response.status_code)
+                            await self.metrics.provider_request(
+                                candidate.provider.name, candidate.model.name, candidate.provider.tier,
+                                "error", str(response.status_code),
+                                (time.monotonic() - attempt_started) * 1000,
+                            )
+                            credential_index += 1
+                            continue
+                        if response.status_code in RETRY_STATUS and attempt < max_upstream_rounds:
                             await response.aread()
                             if trace_handle is not None:
                                 self.telemetry.finish_provider(trace_handle, status_code=response.status_code)
@@ -958,7 +983,7 @@ class GatewayRouter:
                         await self.quota.reconcile(reservation, None, False)
                         await self._failed(candidate)
                         raise
-                    if attempt < routing.retry_attempts:
+                    if attempt < max_upstream_rounds:
                         delay = self._retry_delay(None, attempt)
                         if deadline is None or time.monotonic() + delay < deadline:
                             await self._record_retry(candidate, attempt, "transport", delay)
@@ -1019,14 +1044,25 @@ class GatewayRouter:
             )
             attempt_started = time.monotonic()
             try:
-                response = await self.client.post(
-                    self._operation_url(candidate.provider, operation),
-                    headers=self._headers(candidate.provider),
-                    json=(
-                        self._operation_payload(candidate, payload, operation)
-                    ),
-                    timeout=timeout,
-                )
+                credentials = candidate.provider.credential_values()
+                if not credentials:
+                    credentials = [("legacy", candidate.provider.api_key() or "")]
+                response = None
+                for credential_index, (_credential_id, credential) in enumerate(credentials):
+                    response = await self.client.post(
+                        self._operation_url(candidate.provider, operation),
+                        headers=self._headers(candidate.provider, credential),
+                        json=self._operation_payload(candidate, payload, operation),
+                        timeout=timeout,
+                    )
+                    if response.status_code not in {401, 403} or credential_index == len(credentials) - 1:
+                        break
+                    await self.metrics.provider_request(
+                        candidate.provider.name, candidate.model.name, candidate.provider.tier,
+                        "error", str(response.status_code),
+                        (time.monotonic() - attempt_started) * 1000,
+                    )
+                assert response is not None
                 if trace_handle is not None:
                     self.telemetry.finish_provider(trace_handle, status_code=response.status_code)
                 elapsed_ms = (time.monotonic() - attempt_started) * 1000
@@ -1111,8 +1147,9 @@ class GatewayRouter:
         return f"{provider.base_url.rstrip('/')}/{path.lstrip('/')}"
 
     @staticmethod
-    def _headers(provider: ProviderConfig) -> dict[str, str]:
-        credential = provider.api_key() or ""
+    def _headers(provider: ProviderConfig, credential: str | None = None) -> dict[str, str]:
+        credential = provider.api_key() if credential is None else credential
+        credential = credential or ""
         value = f"{provider.api_key_prefix} {credential}".strip()
         return {provider.api_key_header: value, **provider.headers}
 

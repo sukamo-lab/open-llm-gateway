@@ -6,6 +6,15 @@ features:
   authentication: true
   admin_api: true
   managed_keys: true
+  # Organization/project/principal administration is opt-in.
+  identity_hierarchy: false
+  # Deny-by-default roles and scoped keys; requires identity_hierarchy.
+  rbac: false
+  # OIDC bearer JWT validation; requires rbac and the optional oidc package extra.
+  oidc: false
+  audit_ledger: false
+  envelope_encryption: false
+  residency_enforcement: false
   tenant_quotas: true
   provider_quotas: true
   usage_accounting: true
@@ -43,6 +52,35 @@ auth:
   # Use 0 for immediate cross-replica revocation, or a few seconds for lower latency.
   key_cache_seconds: 5
   key_cache_max_entries: 10000
+
+oidc:
+  issuer: null
+  audience: null
+  algorithms: [RS256]
+  jwks_cache_seconds: 300
+  jwks_max_keys: 32
+  clock_skew_seconds: 30
+  http_timeout_seconds: 5
+  tenant_id_claim: tenant_id
+  organization_id_claim: organization_id
+  project_id_claim: project_id
+  max_token_bytes: 16384
+
+audit:
+  export_url: null
+  export_token_env: null
+  export_batch_size: 500
+  export_timeout_seconds: 10
+  read_max_events: 1000
+
+encryption:
+  keys_env: LLM_GATEWAY_ENCRYPTION_KEYS
+  active_key_version: v1
+  rotation_batch_size: 100
+  allow_plaintext_migration: false
+
+residency:
+  policy: residency
 
 routing:
   # 0 tries every eligible provider. Paid providers always sort after free ones.
@@ -190,6 +228,10 @@ providers:
   - name: google-free
     base_url: https://generativelanguage.googleapis.com/v1beta/openai
     api_key_env: GOOGLE_API_KEY
+    # For zero-downtime rotation, replace api_key_env with an ordered overlap set:
+    # credentials:
+    #   - {id: v2, api_key_env: GOOGLE_API_KEY_V2}
+    #   - {id: v1, api_key_env: GOOGLE_API_KEY_V1}
     tier: free
     region: us-central
     residencies: [us]

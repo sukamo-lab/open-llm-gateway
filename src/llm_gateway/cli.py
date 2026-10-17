@@ -18,12 +18,14 @@ def storage_components(config) -> tuple[str, ...]:
     if any((config.features.provider_quotas, config.features.tenant_quotas,
             config.features.usage_accounting)):
         components.append("usage")
-    if config.features.managed_keys:
+    if config.features.managed_keys or config.features.identity_hierarchy:
         components.append("identity")
     if config.features.idempotency:
         components.append("idempotency")
     if config.features.exact_cache and config.cache.backend == "database":
         components.append("cache")
+    if config.features.audit_ledger:
+        components.append("audit")
     return tuple(components)
 
 

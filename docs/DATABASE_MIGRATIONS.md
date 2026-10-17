@@ -48,3 +48,17 @@ To roll back the application:
 5. Preserve the upgraded database separately until the incident is resolved.
 
 Never copy an active SQLite database file directly; use the generated backup, the SQLite backup API, or stop all writers first.
+
+### Identity schema version 2
+
+Version 2 adds organizations, projects, principals, scoped indexes, and a nullable `tenants.organization_id` column. Existing tenants and hashed consumer keys are preserved and remain unassigned. Upgrade with the normal `--migrate` command before enabling `features.identity_hierarchy`.
+
+Rollback uses the standard backup restore procedure above. Because the migration is additive, a previous binary may continue against the upgraded database only if it ignores unknown tables and columns; otherwise restore the pre-migration SQLite copy or PostgreSQL backup. Do not manually drop hierarchy tables while any newer gateway replica is running.
+
+### Identity schema version 3
+
+Version 3 adds role bindings plus nullable principal, project, and permission-ceiling metadata to consumer keys. Existing keys remain valid while RBAC is disabled and are intentionally denied after RBAC is enabled. Roll back by disabling RBAC first, stopping newer replicas, and restoring the pre-upgrade backup when the previous binary cannot tolerate the additive schema.
+
+### Audit schema version 1
+
+Audit version 1 creates append-only events, mutation-prevention triggers, and exporter checkpoints. Rollback requires disabling `audit_ledger`, stopping all newer replicas, and restoring the pre-upgrade backup. Do not drop or truncate audit tables as a down-migration; retain or export them according to policy.

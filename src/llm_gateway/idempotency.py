@@ -30,10 +30,15 @@ def request_hash(payload: dict[str, Any]) -> str:
 
 
 class SQLiteIdempotencyStore:
-    def __init__(self, database: str, ttl_seconds: int, lease_seconds: int):
+    def __init__(
+        self, database: str, ttl_seconds: int, lease_seconds: int,
+        cipher=None, allow_plaintext_migration: bool = False,
+    ):
         self.database = database
         self.ttl_seconds = ttl_seconds
         self.lease_seconds = lease_seconds
+        self.cipher = cipher
+        self.allow_plaintext_migration = allow_plaintext_migration
         self._lock = asyncio.Lock()
 
     def _connect(self) -> sqlite3.Connection:
@@ -84,8 +89,14 @@ class SQLiteIdempotencyStore:
             if row["request_hash"] != fingerprint:
                 return IdempotencyClaim("conflict")
             if row["state"] == "completed" and row["response_json"]:
+                value = row["response_json"]
+                if self.cipher:
+                    if value.startswith("enc:v1:"):
+                        value = self.cipher.decrypt(value, f"idempotency:{tenant_id}:{digest}")
+                    elif not self.allow_plaintext_migration:
+                        raise RuntimeError("unencrypted idempotency response requires migration")
                 try:
-                    return IdempotencyClaim("cached", response=json.loads(row["response_json"]))
+                    return IdempotencyClaim("cached", response=json.loads(value))
                 except (TypeError, ValueError):
                     db.execute(
                         "DELETE FROM idempotency_records WHERE tenant_id=? AND key_hash=?",
@@ -110,6 +121,8 @@ class SQLiteIdempotencyStore:
             )
 
     def _complete(self, tenant_id: str, digest: str, owner_token: str, response_json: str) -> bool:
+        if self.cipher:
+            response_json = self.cipher.encrypt(response_json, f"idempotency:{tenant_id}:{digest}")
         with self._connect() as db:
             cursor = db.execute(
                 """UPDATE idempotency_records SET state='completed',response_json=?,lease_until=0
@@ -135,10 +148,15 @@ class SQLiteIdempotencyStore:
 
 
 class PostgresIdempotencyStore:
-    def __init__(self, dsn: str, ttl_seconds: int, lease_seconds: int):
+    def __init__(
+        self, dsn: str, ttl_seconds: int, lease_seconds: int,
+        cipher=None, allow_plaintext_migration: bool = False,
+    ):
         self.dsn = dsn
         self.ttl_seconds = ttl_seconds
         self.lease_seconds = lease_seconds
+        self.cipher = cipher
+        self.allow_plaintext_migration = allow_plaintext_migration
         self.pool = None
 
     async def initialize(self) -> None:
@@ -180,8 +198,14 @@ class PostgresIdempotencyStore:
             if row["request_hash"] != fingerprint:
                 return IdempotencyClaim("conflict")
             if row["state"] == "completed" and row["response_json"]:
+                value = row["response_json"]
+                if self.cipher:
+                    if value.startswith("enc:v1:"):
+                        value = self.cipher.decrypt(value, f"idempotency:{tenant_id}:{digest}")
+                    elif not self.allow_plaintext_migration:
+                        raise RuntimeError("unencrypted idempotency response requires migration")
                 try:
-                    return IdempotencyClaim("cached", response=json.loads(row["response_json"]))
+                    return IdempotencyClaim("cached", response=json.loads(value))
                 except (TypeError, ValueError):
                     await db.execute(
                         "DELETE FROM idempotency_records WHERE tenant_id=$1 AND key_hash=$2",
@@ -201,6 +225,8 @@ class PostgresIdempotencyStore:
         self, tenant_id: str, digest: str, owner_token: str, response_json: str
     ) -> bool:
         assert self.pool
+        if self.cipher:
+            response_json = self.cipher.encrypt(response_json, f"idempotency:{tenant_id}:{digest}")
         result = await self.pool.execute(
             """UPDATE idempotency_records SET state='completed',response_json=$1,lease_until=0
             WHERE tenant_id=$2 AND key_hash=$3 AND owner_token=$4 AND state='pending'""",

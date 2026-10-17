@@ -67,6 +67,20 @@ For prompt-injection policy, monitor `llm_gateway_prompt_injection_events_total`
 6. Back up the SQLite database. For multi-replica scale-out, migrate accounting to a shared transactional store before adding replicas.
 7. Pin image versions, scan dependencies, and rotate provider credentials regularly.
 
+## Audit ledger and export
+
+Enable `features.audit_ledger` only after choosing the shared database appropriate for the deployment. SQLite serializes a single process; PostgreSQL uses an advisory lock so replicas append to one global chain. Verify it with `GET /admin/audit/verify` and retrieve bounded records with `GET /admin/audit/events?after=<sequence>&limit=<count>`.
+
+Configure `audit.export_url`, optional `audit.export_token_env`, and a bounded batch size, then call `POST /admin/audit/export`. Delivery is at-least-once: the sink must deduplicate by `sequence` plus `event_hash` or the `Idempotency-Key` header. The checkpoint advances only after a 2xx response. A timeout, non-2xx response, or process interruption before checkpointing replays the batch; an interruption after checkpointing starts at the next event. Repeatedly invoke export until `exported` is zero. Apply upstream rate limits and monitor 502 responses; the batch bound provides backpressure and the gateway never drops records to catch up.
+
+Exported records can be independently verified by starting with 64 zeroes as `previous_hash`, checking strict sequence ordering, canonicalizing the documented event fields as sorted compact JSON, and comparing each SHA-256 digest with `event_hash`. Database triggers prevent ordinary updates/deletes, but a database superuser can disable them and recompute the chain. Send exports to immutable external storage or a transparency service to anchor trust outside the gateway database.
+
+Run `python scripts/verify_audit_export.py export.json` outside the gateway process to verify a complete JSON batch, `{ "events": [...] }` payload, or JSON Lines file. For a later segment, pass the previously anchored `--checkpoint-sequence` and `--checkpoint-hash`.
+
+## Residency enforcement
+
+Treat configured provider regions and residency labels as operator assertions unless your provider contract and deployment process independently attest them. With `residency_enforcement` enabled, readiness/configuration validation requires a named policy with required residency labels and denied fallback. Requests cannot select a different policy, and an operation or model outside the enforced policy is rejected rather than routed without residency constraints. During an outage, add only a provider that satisfies the same policy; do not change fallback to `default` as an availability workaround.
+
 An unauthenticated gateway is permitted only on a localhost bind. Readiness fails when authentication is disabled and the configured host exposes the service to the network.
 
 ## Circuit breaker
