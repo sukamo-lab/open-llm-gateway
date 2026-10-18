@@ -1,6 +1,25 @@
+import os
+import subprocess
+import sys
+
 from fastapi.testclient import TestClient
 
 from llm_gateway.app import create_app
+
+
+def test_importing_app_helpers_does_not_require_default_config(tmp_path):
+    env = os.environ.copy()
+    env.pop("LLM_GATEWAY_CONFIG", None)
+    result = subprocess.run(
+        [sys.executable, "-c", "from llm_gateway.app import create_app"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_identity_hierarchy_routes_are_feature_flagged_and_tenant_isolated(tmp_path, monkeypatch):

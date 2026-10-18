@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import os
 import re
 import sys
 import tomllib
@@ -94,7 +93,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Validate and compare release artifacts")
     commands = parser.add_subparsers(dest="command", required=True)
     metadata = commands.add_parser("metadata")
-    metadata.add_argument("--tag", default=os.getenv("GITHUB_REF_NAME"))
+    metadata.add_argument("--tag")
     compare_parser = commands.add_parser("compare")
     compare_parser.add_argument("first", type=Path)
     compare_parser.add_argument("second", type=Path)

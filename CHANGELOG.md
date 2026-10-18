@@ -4,6 +4,8 @@ All notable product changes are recorded here. The project follows [Semantic Ver
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-17
+
 ### Added
 
 - Apache-2.0 licensing, maintainer-led governance, controlled contribution guidance, private security reporting, community issue templates, and automated dependency updates.
@@ -37,6 +39,12 @@ All notable product changes are recorded here. The project follows [Semantic Ver
 - Opt-in versioned AES-GCM envelope encryption for persisted cache/idempotency responses with resumable rotation.
 - Ordered overlapping provider credential references with safe non-streaming 401/403 fallback during rotation.
 - Enforceable named residency routing policy with denied fallback and override-bypass prevention.
+
+### Fixed
+
+- Application helpers can be imported from fresh checkouts and installed packages without requiring a working-directory configuration file.
+- Branch CI validates release metadata without misinterpreting the branch name as a release tag.
+- PostgreSQL integration coverage follows the authoritative component migration versions.
 
 ## [0.5.0] - 2026-10-13
 

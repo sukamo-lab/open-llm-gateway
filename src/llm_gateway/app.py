@@ -1788,8 +1788,17 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
 
 
 def app_from_env() -> FastAPI:
-    import os
     return create_app(os.getenv("LLM_GATEWAY_CONFIG", "config.yaml"))
 
 
-app = app_from_env()
+def __getattr__(name: str):
+    """Create the ASGI application only when an ASGI server requests it.
+
+    Importing helpers such as ``create_app`` must not require an operator's
+    configuration file to exist in the current working directory.  Uvicorn's
+    existing ``llm_gateway.app:app`` target remains supported through the
+    module attribute hook defined by PEP 562.
+    """
+    if name == "app":
+        return app_from_env()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

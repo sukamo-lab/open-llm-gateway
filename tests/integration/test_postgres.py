@@ -8,6 +8,7 @@ import pytest
 from llm_gateway.config import Limit, ProviderConfig
 from llm_gateway.cache import PostgresCacheStore
 from llm_gateway.idempotency import PostgresIdempotencyStore, key_hash, request_hash
+from llm_gateway.migrations import LATEST_VERSIONS
 from llm_gateway.postgres import PostgresStore
 
 
@@ -40,7 +41,7 @@ async def test_postgres_quota_reservation_reconciliation_and_snapshot():
     suffix = uuid.uuid4().hex
     configured_provider = provider(f"provider-{suffix}")
     try:
-        assert (await store.migration_status())["usage"] == 1
+        assert (await store.migration_status())["usage"] == LATEST_VERSIONS["usage"]
         first = await store.reserve(configured_provider, f"request-{suffix}-1", 8)
         assert first is not None
         assert await store.reserve(configured_provider, f"request-{suffix}-2", 1) is None
@@ -65,7 +66,9 @@ async def test_postgres_tenant_key_lifecycle_and_limits():
     await store.initialize()
     suffix = uuid.uuid4().hex
     try:
-        assert await store.migration_status() == {"usage": 1, "identity": 1}
+        assert await store.migration_status() == {
+            component: LATEST_VERSIONS[component] for component in ("usage", "identity")
+        }
         tenant = await store.create_tenant(f"tenant-{suffix}", requests_per_minute=3)
         issued = await store.issue_key(tenant["id"], "integration-key", expires_in_days=1)
 
