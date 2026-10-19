@@ -4,6 +4,8 @@ All notable product changes are recorded here. The project follows [Semantic Ver
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-19
+
 ### Added
 
 - First `FIN-PLAN-001` slice: opt-in versioned tenant plans, persistent plan assignment, enforced API entitlements, plan-derived quota ceilings, append-only expiring credit grants, an administrator plan catalog, and usage-backed credit/budget status.
