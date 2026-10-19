@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "llm-gateway.name" . }}
+spec:
+  selector: {{- include "llm-gateway.labels" . | nindent 4 }}
+  ports: [{name: http, port: {{ .Values.service.port }}, targetPort: http}]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "llm-gateway.name" . }}
+automountServiceAccountToken: false

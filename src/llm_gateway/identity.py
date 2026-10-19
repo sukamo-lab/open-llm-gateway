@@ -24,6 +24,8 @@ class AuthContext:
     project_id: str | None = None
     principal_id: str | None = None
     permissions: frozenset[str] = frozenset()
+    plan_id: str | None = None
+    entitlements: frozenset[str] = frozenset()
 
 
 class IdentityStore:
@@ -31,12 +33,13 @@ class IdentityStore:
 
     def __init__(
         self, database: str, cache_seconds: int = 60, cache_max_entries: int = 10_000,
-        rbac_enabled: bool = False,
+        rbac_enabled: bool = False, plans: dict[str, object] | None = None,
     ):
         self.database = database
         self.cache_seconds = cache_seconds
         self.cache_max_entries = cache_max_entries
         self.rbac_enabled = rbac_enabled
+        self.plans = plans or {}
         self._write_lock = asyncio.Lock()
         self._cache: OrderedDict[str, tuple[float, AuthContext | None]] = OrderedDict()
 
@@ -60,10 +63,13 @@ class IdentityStore:
 
     @staticmethod
     def _hash(token: str) -> str:
-        return hashlib.sha256(token.encode("utf-8")).hexdigest()
+        # Consumer keys contain 256 bits of generated entropy. This is an indexed
+        # token fingerprint, not a human
+        # password verifier; a password KDF would add latency without improving
+        # resistance to guessing and would invalidate existing stored hashes.
+        return hashlib.sha256(token.encode("utf-8"), usedforsecurity=False).hexdigest()
 
-    @staticmethod
-    def _limits(row: sqlite3.Row) -> tuple[Limit, ...]:
+    def _limits(self, row: sqlite3.Row) -> tuple[Limit, ...]:
         result = []
         if row["requests_per_minute"]:
             result.append(Limit(requests=row["requests_per_minute"], window_seconds=60))
@@ -71,7 +77,24 @@ class IdentityStore:
             result.append(Limit(tokens=row["tokens_per_day"], window_seconds=86400))
         if row["cost_per_30_days"]:
             result.append(Limit(cost_usd=row["cost_per_30_days"], window_seconds=2592000))
+        plan = self.plans.get(row["plan_id"])
+        if plan:
+            if plan.requests_per_minute:
+                result.append(Limit(requests=plan.requests_per_minute, window_seconds=60))
+            if plan.tokens_per_day:
+                result.append(Limit(tokens=plan.tokens_per_day, window_seconds=86400))
+            if plan.cost_per_30_days:
+                result.append(Limit(cost_usd=plan.cost_per_30_days, window_seconds=2592000))
         return tuple(result)
+
+    def _plan_context(self, row: sqlite3.Row) -> tuple[str | None, frozenset[str]] | None:
+        plan_id = row["plan_id"]
+        if not self.plans:
+            return None, frozenset()
+        plan = self.plans.get(plan_id)
+        if plan_id and plan is None:
+            return None
+        return plan_id, frozenset(plan.entitlements) if plan else frozenset()
 
     async def authenticate(self, token: str) -> AuthContext | None:
         digest = self._hash(token)
@@ -115,9 +138,13 @@ class IdentityStore:
                     ceiling = json.loads(row["permission_ceiling"]) if row["permission_ceiling"] else None
                     permissions = apply_key_ceiling(granted, ceiling)
                 db.execute("UPDATE consumer_keys SET last_used_at = ? WHERE id = ?", (time.time(), row["key_id"]))
+                plan_context = self._plan_context(row)
+                if plan_context is None:
+                    return None
+                plan_id, entitlements = plan_context
                 return AuthContext(
                     row["id"], row["key_id"], self._limits(row), row["organization_id"],
-                    row["key_project_id"], row["principal_id"], permissions,
+                    row["key_project_id"], row["principal_id"], permissions, plan_id, entitlements,
                 )
 
         context = await asyncio.to_thread(lookup)
@@ -150,10 +177,14 @@ class IdentityStore:
                     AND organization_id=? AND (project_id IS NULL OR project_id=?)""",
                     (row["principal_id"], organization_id, project_id),
                 ).fetchall()
+                plan_context = self._plan_context(row)
+                if plan_context is None:
+                    return None
+                plan_id, entitlements = plan_context
                 return AuthContext(
                     tenant_id, f"oidc:{row['principal_id']}", self._limits(row),
                     organization_id, project_id, row["principal_id"],
-                    role_permissions([item["role_name"] for item in roles]),
+                    role_permissions([item["role_name"] for item in roles]), plan_id, entitlements,
                 )
 
         return await asyncio.to_thread(lookup)
@@ -161,7 +192,7 @@ class IdentityStore:
     async def create_tenant(
         self, name: str, requests_per_minute: int | None = None,
         tokens_per_day: int | None = None, cost_per_30_days: float | None = None,
-        organization_id: str | None = None,
+        organization_id: str | None = None, plan_id: str | None = None,
     ) -> dict[str, object]:
         tenant_id = str(uuid.uuid4())
         async with self._write_lock:
@@ -172,18 +203,45 @@ class IdentityStore:
                     raise KeyError("organization not found or disabled")
                 db.execute(
                     """INSERT INTO tenants
-                    (id,name,active,requests_per_minute,tokens_per_day,cost_per_30_days,created_at,organization_id)
-                    VALUES (?, ?, 1, ?, ?, ?, ?, ?)""",
+                    (id,name,active,requests_per_minute,tokens_per_day,cost_per_30_days,created_at,organization_id,plan_id)
+                    VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)""",
                     (tenant_id, name, requests_per_minute, tokens_per_day,
-                     cost_per_30_days, time.time(), organization_id),
+                     cost_per_30_days, time.time(), organization_id, plan_id),
                 )
-        return {"id": tenant_id, "name": name, "active": True, "organization_id": organization_id}
+        return {"id": tenant_id, "name": name, "active": True, "organization_id": organization_id, "plan_id": plan_id}
 
     async def list_tenants(self) -> list[dict[str, object]]:
         with self._connect() as db:
             rows = db.execute(
                 """SELECT id, name, active, requests_per_minute, tokens_per_day,
-                cost_per_30_days, created_at, organization_id FROM tenants ORDER BY created_at"""
+                cost_per_30_days, created_at, organization_id, plan_id FROM tenants ORDER BY created_at"""
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    async def grant_credit(
+        self, tenant_id: str, amount_usd: float, source: str,
+        expires_at: float | None = None,
+    ) -> dict[str, object]:
+        item = {
+            "id": str(uuid.uuid4()), "tenant_id": tenant_id, "amount_usd": amount_usd,
+            "source": source, "created_at": time.time(), "expires_at": expires_at,
+        }
+        async with self._write_lock:
+            with self._connect() as db:
+                if not db.execute("SELECT 1 FROM tenants WHERE id=?", (tenant_id,)).fetchone():
+                    raise KeyError("tenant not found")
+                db.execute(
+                    """INSERT INTO tenant_credit_grants
+                    (id,tenant_id,amount_usd,source,created_at,expires_at)
+                    VALUES(?,?,?,?,?,?)""", tuple(item.values()),
+                )
+        return item
+
+    async def list_credits(self, tenant_id: str) -> list[dict[str, object]]:
+        with self._connect() as db:
+            rows = db.execute(
+                """SELECT id,tenant_id,amount_usd,source,created_at,expires_at
+                FROM tenant_credit_grants WHERE tenant_id=? ORDER BY created_at,id""", (tenant_id,),
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -338,7 +396,7 @@ class IdentityStore:
     async def update_tenant(self, tenant_id: str, changes: dict[str, object]) -> dict[str, object] | None:
         allowed = {
             "name", "active", "requests_per_minute", "tokens_per_day",
-            "cost_per_30_days", "organization_id",
+            "cost_per_30_days", "organization_id", "plan_id",
         }
         values = {key: value for key, value in changes.items() if key in allowed}
         if values:

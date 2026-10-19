@@ -1,5 +1,6 @@
 import pytest
 
+from llm_gateway.config import PlanConfig
 from llm_gateway.identity import IdentityStore
 
 
@@ -15,6 +16,29 @@ async def test_key_lifecycle_and_bounded_cache(tmp_path):
     await store.authenticate("invalid-two")
     assert len(store._cache) <= 2
     assert await store.revoke_key(issued["id"])
+    assert await store.authenticate(issued["api_key"]) is None
+
+
+@pytest.mark.asyncio
+async def test_plan_assignment_adds_versioned_entitlements_and_quota_limits(tmp_path):
+    plan = PlanConfig(
+        id="starter", pricing_version="2026-10", entitlements={"chat"},
+        requests_per_minute=3, tokens_per_day=100,
+    )
+    store = IdentityStore(str(tmp_path / "plans.db"), plans={plan.id: plan})
+    await store.initialize()
+    tenant = await store.create_tenant("tenant", plan_id=plan.id)
+    issued = await store.issue_key(tenant["id"], "service")
+
+    context = await store.authenticate(issued["api_key"])
+
+    assert context and context.plan_id == "starter"
+    assert context.entitlements == frozenset({"chat"})
+    assert {(item.requests, item.tokens, item.window_seconds) for item in context.limits} == {
+        (3, None, 60), (None, 100, 86400),
+    }
+    assert (await store.list_tenants())[0]["plan_id"] == "starter"
+    await store.update_tenant(tenant["id"], {"plan_id": "removed-plan"})
     assert await store.authenticate(issued["api_key"]) is None
 
 

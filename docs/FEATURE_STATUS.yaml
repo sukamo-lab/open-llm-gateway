@@ -1,6 +1,6 @@
 schema_version: 1
 product_version: 0.9.0
-last_updated: 2026-10-17
+last_updated: 2026-10-19
 status_values: [implemented, partial, planned, deferred]
 
 # This is the canonical product capability ledger. Never store credentials,
@@ -110,7 +110,22 @@ features:
       - tests/integration/test_postgres.py
       - docs/CONFIGURATION.md
     notes: Tenant-scoped persistent replay, conflict detection, concurrent coalescing, and lease recovery are implemented for non-streaming chat; full pytest and live PostgreSQL verification remain pending.
-  - {id: API-BATCH-001, pillar: unified_api, name: Batch API, status: planned, target: v1.0, depends_on: [JOB-ASYNC-001]}
+  - id: API-BATCH-001
+    pillar: unified_api
+    name: Batch API
+    status: partial
+    target: v1.0
+    depends_on: [JOB-ASYNC-001]
+    verified: 2026-10-19
+    evidence:
+      - src/llm_gateway/app.py
+      - src/llm_gateway/jobs.py
+      - src/llm_gateway/config.py
+      - tests/test_config.py
+      - tests/test_batch.py
+      - tests/integration/test_postgres.py
+      - docs/CONFIGURATION.md
+    notes: Opt-in bounded tenant-isolated non-streaming chat batches use the durable job subsystem, hosted leased workers, per-item safe results, status/cancel aliases, handler-specific claims, and explicit sensitive-payload persistence acknowledgement. Configuration fails closed when synchronous content-governance stages are enabled. Configuration, end-to-end mocked-provider execution, tenant isolation, and the shared PostgreSQL job/lease substrate pass. Asynchronous content-governance integration, live-provider compatibility, retention automation, and sustained batch load tests remain pending.
   - id: DISC-MODEL-001
     pillar: unified_api
     name: Controlled upstream model discovery
@@ -208,7 +223,19 @@ features:
       - docs/OPERATIONS.md
       - CHANGELOG.md
     notes: Configurable bounded retries, jitter, Retry-After, deadlines, metrics, logs, and attempt metadata cover non-streaming calls and streaming failures before the first byte. An interrupted stream is never retried or failed over after bytes are emitted, preventing mixed-provider SSE output. Status remains partial pending hosted Windows/Linux CI and live-provider streaming verification; replay of an interrupted stream remains a client decision because partial output cannot be safely withdrawn.
-  - {id: RES-DISTCB-001, pillar: resilience, name: Distributed circuit and concurrency coordination, status: planned, target: v1.0}
+  - id: RES-DISTCB-001
+    pillar: resilience
+    name: Distributed circuit and concurrency coordination
+    status: partial
+    target: v1.0
+    verified: 2026-10-19
+    evidence:
+      - src/llm_gateway/coordination.py
+      - src/llm_gateway/router.py
+      - src/llm_gateway/migrations.py
+      - tests/test_router.py
+      - tests/integration/test_postgres.py
+    notes: Opt-in PostgreSQL coordination shares provider circuit state and atomic crash-expiring concurrency leases across replicas for all provider operations. Active lease renewal, expired-lease recovery, shared circuit transitions, and simultaneous two-pool exclusion passed live PostgreSQL verification. Redis is not required when PostgreSQL is selected; sustained horizontal load/failover and overhead benchmarks remain pending.
   - id: CACHE-EXACT-001
     pillar: resilience
     name: Exact tenant-isolated cache
@@ -222,7 +249,18 @@ features:
       - tests/integration/test_postgres.py
       - docs/CONFIGURATION.md
     notes: Opt-in tenant-isolated memory, SQLite, PostgreSQL, and Redis backends with bounds, bypass, and configuration-aware keys are implemented; full pytest, live PostgreSQL/Redis, metrics, and latency verification remain pending.
-  - {id: CACHE-SEM-001, pillar: resilience, name: Privacy-aware semantic cache, status: planned, target: v1.0, depends_on: [CACHE-EXACT-001, API-EMBED-001]}
+  - id: CACHE-SEM-001
+    pillar: resilience
+    name: Privacy-aware semantic cache
+    status: partial
+    target: v1.0
+    depends_on: [CACHE-EXACT-001, API-EMBED-001]
+    verified: 2026-10-18
+    evidence:
+      - src/llm_gateway/semantic_cache.py
+      - src/llm_gateway/app.py
+      - tests/test_semantic_cache.py
+    notes: Opt-in non-streaming chat lookup uses bounded tenant-partitioned memory indexes, pinned embedding versions, request-scope hashing, TTLs, similarity thresholds, and explicit PII/sensitive-content policy. Durable SQLite/PostgreSQL/Redis vector indexes, provider embedding adapters, metrics, adversarial privacy tests, and sustained latency/resource benchmarks remain pending.
 
   - id: IAM-MODE-001
     pillar: iam
@@ -293,8 +331,37 @@ features:
     status: implemented
     verified: 2026-10-12
     evidence: [src/llm_gateway/quota.py, src/llm_gateway/router.py]
-  - {id: FIN-PLAN-001, pillar: finops, name: Plans entitlements credits and budget alerts, status: planned, target: v1.0}
-  - {id: FIN-EXPORT-001, pillar: finops, name: Immutable usage export and reconciliation, status: planned, target: v1.0, depends_on: [AUDIT-LEDGER-001]}
+  - id: FIN-PLAN-001
+    pillar: finops
+    name: Plans entitlements credits and budget alerts
+    status: partial
+    target: v1.0
+    verified: 2026-10-19
+    evidence:
+      - src/llm_gateway/config.py
+      - src/llm_gateway/identity.py
+      - src/llm_gateway/postgres.py
+      - src/llm_gateway/migrations.py
+      - tests/test_config.py
+      - tests/test_identity.py
+      - tests/integration/test_postgres.py
+      - docs/CONFIGURATION.md
+    notes: Versioned configured plans support persistent SQLite/PostgreSQL tenant assignment, enforced API entitlements, a read-only admin catalog, request/token/spend quota ceilings, usage-backed included-credit balances, append-only purchased/promotional grants with optional expiry, and deterministic pollable budget thresholds. Live PostgreSQL assignment, entitlement, credit immutability, and composed-limit verification passes. Push alert delivery, mutable plan lifecycle APIs, and sustained performance benchmarks remain pending.
+  - id: FIN-EXPORT-001
+    pillar: finops
+    name: Immutable usage export and reconciliation
+    status: partial
+    target: v1.0
+    depends_on: [AUDIT-LEDGER-001]
+    verified: 2026-10-19
+    evidence:
+      - src/llm_gateway/quota.py
+      - src/llm_gateway/postgres.py
+      - src/llm_gateway/app.py
+      - tests/test_quota.py
+      - tests/integration/test_postgres.py
+      - docs/OPERATIONS.md
+    notes: Feature-flagged administrator APIs provide deterministic cursor-paginated completed usage, canonical page checksums, bounded reconciliation totals, and replay-safe HTTPS sink delivery with durable per-sink checkpoints advanced only after 2xx acceptance. SQLite/PostgreSQL triggers make completed rows immutable, and live PostgreSQL export/checkpoint/mutation tests pass. Large-dataset reconciliation and sustained export throughput verification remain pending.
   - {id: FIN-STRIPE-001, pillar: finops, name: Optional Stripe billing adapter, status: planned, target: v1.0, depends_on: [FIN-PLAN-001, FIN-EXPORT-001]}
 
   - id: SEC-SECRET-001
@@ -522,9 +589,43 @@ features:
       - config.example.yaml
       - docs/OPERATIONS.md
     notes: An opt-in administrator endpoint validates and atomically swaps routing/provider/model state while preserving the last-known-good router on failure and retaining bounded old pools for in-flight requests; structural feature/storage/auth changes, exact-cache coexistence, cross-replica coordination, file watching, full CI, and load verification remain pending.
-  - {id: JOB-ASYNC-001, pillar: dx_deployment, name: Durable asynchronous jobs and signed webhooks, status: planned, target: v1.0}
-  - {id: DEPLOY-HELM-001, pillar: dx_deployment, name: Hardened Kubernetes Helm chart, status: planned, target: v1.0}
-  - {id: OPS-DR-001, pillar: dx_deployment, name: Backup restore and disaster-recovery drills, status: planned, target: v1.0}
+  - id: JOB-ASYNC-001
+    pillar: dx_deployment
+    name: Durable asynchronous jobs and signed webhooks
+    status: implemented
+    target: v1.0
+    verified: 2026-10-19
+    evidence:
+      - src/llm_gateway/jobs.py
+      - src/llm_gateway/migrations.py
+      - tests/test_jobs.py
+      - tests/integration/test_postgres.py
+    notes: SQLite/PostgreSQL stores provide durable tenant-isolated jobs, handler-specific atomic worker leasing, expired-lease recovery, stale-worker rejection, terminal results/errors, status, and idempotent cancellation. Completion webhooks use HTTPS, HMAC-SHA256 signatures, stable idempotency keys, and a transactional leased outbox with exponential retry scheduling. The Batch API supplies a production submission path and hosted workers. Live PostgreSQL job/notification recovery and an actual terminated-worker-process lease takeover pass.
+  - id: DEPLOY-HELM-001
+    pillar: dx_deployment
+    name: Hardened Kubernetes Helm chart
+    status: partial
+    target: v1.0
+    verified: 2026-10-18
+    evidence:
+      - deploy/helm/llm-gateway/Chart.yaml
+      - deploy/helm/llm-gateway/values.yaml
+      - deploy/helm/llm-gateway/templates/deployment.yaml
+      - deploy/helm/llm-gateway/templates/policy.yaml
+      - deploy/helm/llm-gateway/templates/migration-job.yaml
+      - deploy/helm/llm-gateway/examples/external-secret.yaml
+    notes: Chart includes non-root/read-only workload security, probes, resources, migration hook, HPA, PDB, default-deny-style network policy, tokenless service account, and external-secret example. Helm binary rendering/lint, Kubernetes integration, topology spread, metrics-driven autoscaling validation, and production upgrade/load drills remain pending.
+  - id: OPS-DR-001
+    pillar: dx_deployment
+    name: Backup restore and disaster-recovery drills
+    status: partial
+    target: v1.0
+    verified: 2026-10-18
+    evidence:
+      - scripts/sqlite_backup.py
+      - tests/test_sqlite_backup.py
+      - docs/DISASTER_RECOVERY.md
+    notes: Verifiable online SQLite backup, SHA-256 manifests, integrity checks, guarded non-overwriting restore, and SQLite/PostgreSQL multi-replica drill procedures are available. Automated PostgreSQL backup orchestration, executed restore/failover drills, measured RPO/RTO, off-site retention validation, and Kubernetes drill evidence remain pending.
   - {id: UI-CONSOLE-001, pillar: dx_deployment, name: Optional web management console, status: planned, target: v1.x}
   - {id: SDK-GEN-001, pillar: dx_deployment, name: Generated SDKs and typed configuration schema, status: planned, target: v1.x}
   - {id: PLUGIN-SDK-001, pillar: dx_deployment, name: Versioned extension SDK, status: planned, target: v1.x}

@@ -24,6 +24,7 @@ class PostgresStore:
         identity_enabled: bool = True, provider_quotas: bool = True,
         tenant_quotas: bool = True, accounting: bool = True,
         cost_tracking: bool = True, rbac_enabled: bool = False,
+        plans: dict[str, object] | None = None,
     ):
         self.dsn = dsn
         self.cache_seconds = cache_seconds
@@ -34,6 +35,7 @@ class PostgresStore:
         self.accounting = accounting
         self.cost_tracking = cost_tracking
         self.rbac_enabled = rbac_enabled
+        self.plans = plans or {}
         self.usage_enabled = provider_quotas or tenant_quotas or accounting
         self.pool: asyncpg.Pool | None = None
         self._cache: OrderedDict[str, tuple[float, AuthContext | None]] = OrderedDict()
@@ -159,17 +161,52 @@ class PostgresStore:
             FROM usage_events WHERE status!='failed' AND consumer_id IS NOT NULL GROUP BY consumer_id""")
         return [dict(row) for row in rows]
 
+    async def usage_export(
+        self, after: float = 0, after_id: str = "", limit: int = 1000,
+    ) -> list[dict[str, object]]:
+        assert self.pool
+        rows = await self.pool.fetch(
+            """SELECT request_id,created_at,provider,model,consumer_id tenant_id,
+            requests,tokens,prompt_tokens,completion_tokens,cost_usd,status
+            FROM usage_events WHERE status='completed'
+            AND (created_at>$1 OR (created_at=$1 AND request_id>$2))
+            ORDER BY created_at,request_id LIMIT $3""", after, after_id, limit,
+        )
+        return [dict(row) for row in rows]
+
+    async def export_checkpoint(self, sink_id: str) -> tuple[float, str]:
+        assert self.pool
+        row = await self.pool.fetchrow(
+            "SELECT after_timestamp,after_request_id FROM usage_export_checkpoints WHERE sink_id=$1",
+            sink_id,
+        )
+        return (float(row["after_timestamp"]), str(row["after_request_id"])) if row else (0, "")
+
+    async def save_export_checkpoint(
+        self, sink_id: str, after: float, after_id: str, page_sha256: str,
+    ) -> None:
+        assert self.pool
+        await self.pool.execute(
+            """INSERT INTO usage_export_checkpoints
+            (sink_id,after_timestamp,after_request_id,page_sha256,updated_at)
+            VALUES($1,$2,$3,$4,$5) ON CONFLICT(sink_id) DO UPDATE SET
+            after_timestamp=EXCLUDED.after_timestamp,after_request_id=EXCLUDED.after_request_id,
+            page_sha256=EXCLUDED.page_sha256,updated_at=EXCLUDED.updated_at""",
+            sink_id, after, after_id, page_sha256, time.time(),
+        )
+
     async def cleanup(self, before_timestamp: float) -> int:
         assert self.pool
-        result = await self.pool.execute("DELETE FROM usage_events WHERE created_at < $1", before_timestamp)
+        result = await self.pool.execute(
+            "DELETE FROM usage_events WHERE created_at < $1 AND status!='completed'", before_timestamp,
+        )
         return int(result.rsplit(" ", 1)[-1])
 
     @staticmethod
     def _hash(token: str) -> str:
         return hashlib.sha256(token.encode()).hexdigest()
 
-    @staticmethod
-    def _limits(row) -> tuple[Limit, ...]:
+    def _limits(self, row) -> tuple[Limit, ...]:
         limits = []
         if row["requests_per_minute"]:
             limits.append(Limit(requests=row["requests_per_minute"], window_seconds=60))
@@ -177,6 +214,14 @@ class PostgresStore:
             limits.append(Limit(tokens=row["tokens_per_day"], window_seconds=86400))
         if row["cost_per_30_days"]:
             limits.append(Limit(cost_usd=row["cost_per_30_days"], window_seconds=2592000))
+        plan = self.plans.get(row["plan_id"])
+        if plan:
+            if plan.requests_per_minute:
+                limits.append(Limit(requests=plan.requests_per_minute, window_seconds=60))
+            if plan.tokens_per_day:
+                limits.append(Limit(tokens=plan.tokens_per_day, window_seconds=86400))
+            if plan.cost_per_30_days:
+                limits.append(Limit(cost_usd=plan.cost_per_30_days, window_seconds=2592000))
         return tuple(limits)
 
     async def authenticate(self, token: str) -> AuthContext | None:
@@ -214,9 +259,15 @@ class PostgresStore:
                     ceiling = json.loads(row["permission_ceiling"]) if row["permission_ceiling"] else None
                     permissions = apply_key_ceiling(granted, ceiling)
             if valid:
+                plan = self.plans.get(row["plan_id"])
+                if self.plans and row["plan_id"] and plan is None:
+                    valid = False
+            if valid:
                 context = AuthContext(
                     row["id"], row["key_id"], self._limits(row), row["organization_id"],
                     row["key_project_id"], row["principal_id"], permissions,
+                    row["plan_id"] if self.plans else None,
+                    frozenset(plan.entitlements) if plan else frozenset(),
                 )
         if row:
             await self.pool.execute("UPDATE consumer_keys SET last_used_at=$1 WHERE id=$2", time.time(), row["key_id"])
@@ -242,6 +293,9 @@ class PostgresStore:
         )
         if not row:
             return None
+        plan = self.plans.get(row["plan_id"])
+        if self.plans and row["plan_id"] and plan is None:
+            return None
         roles = await self.pool.fetch(
             """SELECT role_name FROM role_bindings WHERE principal_id=$1
             AND organization_id=$2 AND (project_id IS NULL OR project_id=$3)""",
@@ -250,11 +304,13 @@ class PostgresStore:
         return AuthContext(
             tenant_id, f"oidc:{row['principal_id']}", self._limits(row), organization_id,
             project_id, row["principal_id"], role_permissions([item["role_name"] for item in roles]),
+            row["plan_id"] if self.plans else None,
+            frozenset(plan.entitlements) if plan else frozenset(),
         )
 
     async def create_tenant(
         self, name: str, requests_per_minute=None, tokens_per_day=None,
-        cost_per_30_days=None, organization_id: str | None = None,
+        cost_per_30_days=None, organization_id: str | None = None, plan_id: str | None = None,
     ):
         assert self.pool
         if organization_id and not await self.pool.fetchval(
@@ -264,16 +320,42 @@ class PostgresStore:
         tenant_id = str(uuid.uuid4())
         await self.pool.execute(
             """INSERT INTO tenants
-            (id,name,active,requests_per_minute,tokens_per_day,cost_per_30_days,created_at,organization_id)
-            VALUES($1,$2,TRUE,$3,$4,$5,$6,$7)""",
+            (id,name,active,requests_per_minute,tokens_per_day,cost_per_30_days,created_at,organization_id,plan_id)
+            VALUES($1,$2,TRUE,$3,$4,$5,$6,$7,$8)""",
             tenant_id, name, requests_per_minute, tokens_per_day,
-            cost_per_30_days, time.time(), organization_id,
+            cost_per_30_days, time.time(), organization_id, plan_id,
         )
-        return {"id": tenant_id, "name": name, "active": True, "organization_id": organization_id}
+        return {"id": tenant_id, "name": name, "active": True, "organization_id": organization_id, "plan_id": plan_id}
 
     async def list_tenants(self):
         assert self.pool
         return [dict(row) for row in await self.pool.fetch("SELECT * FROM tenants ORDER BY created_at")]
+
+    async def grant_credit(
+        self, tenant_id: str, amount_usd: float, source: str,
+        expires_at: float | None = None,
+    ) -> dict[str, object]:
+        assert self.pool
+        if not await self.pool.fetchval("SELECT 1 FROM tenants WHERE id=$1", tenant_id):
+            raise KeyError("tenant not found")
+        item = {
+            "id": str(uuid.uuid4()), "tenant_id": tenant_id, "amount_usd": amount_usd,
+            "source": source, "created_at": time.time(), "expires_at": expires_at,
+        }
+        await self.pool.execute(
+            """INSERT INTO tenant_credit_grants
+            (id,tenant_id,amount_usd,source,created_at,expires_at)
+            VALUES($1,$2,$3,$4,$5,$6)""", *item.values(),
+        )
+        return item
+
+    async def list_credits(self, tenant_id: str) -> list[dict[str, object]]:
+        assert self.pool
+        rows = await self.pool.fetch(
+            """SELECT id,tenant_id,amount_usd,source,created_at,expires_at
+            FROM tenant_credit_grants WHERE tenant_id=$1 ORDER BY created_at,id""", tenant_id,
+        )
+        return [dict(row) for row in rows]
 
     async def issue_key(
         self, tenant_id: str, name: str, expires_in_days: int | None = None,
@@ -363,7 +445,7 @@ class PostgresStore:
         assert self.pool
         allowed = {
             "name", "active", "requests_per_minute", "tokens_per_day",
-            "cost_per_30_days", "organization_id",
+            "cost_per_30_days", "organization_id", "plan_id",
         }
         values = {key: value for key, value in changes.items() if key in allowed}
         if values:

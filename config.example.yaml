@@ -15,6 +15,18 @@ features:
   audit_ledger: false
   envelope_encryption: false
   residency_enforcement: false
+  # Versioned tenant plans and plan-derived quota ceilings; requires managed keys/admin/tenant quotas.
+  finops_plans: false
+  # Bounded deterministic completed-usage export; requires audit ledger and accounting.
+  finops_export: false
+  # Durable tenant-isolated job status/cancellation foundation.
+  async_jobs: false
+  # Durable bounded chat batches; requires async_jobs and explicit payload persistence approval.
+  batch_api: false
+  # Shared PostgreSQL circuit state and crash-recoverable concurrency leases.
+  distributed_resilience: false
+  # Tenant-isolated semantic response reuse; requires embeddings API and PII policy or explicit opt-in.
+  semantic_cache: false
   tenant_quotas: true
   provider_quotas: true
   usage_accounting: true
@@ -119,6 +131,51 @@ observability:
 
 accounting:
   retention_days: 90
+
+finops:
+  # Required only when features.finops_export is enabled.
+  export_url: null
+  export_token_env: null
+  export_sink_id: default
+  export_batch_size: 1000
+  export_timeout_seconds: 10
+  plans:
+    - id: starter
+      pricing_version: "2026-10"
+      entitlements: [chat]
+      requests_per_minute: 60
+      tokens_per_day: 1000000
+      cost_per_30_days: 25
+      included_credit_usd: 0
+      # Recorded plan metadata only in this slice; delivery is not yet implemented.
+      budget_alert_percentages: [50, 80, 100]
+
+jobs:
+  lease_seconds: 60
+  poll_interval_seconds: 0.25
+  # Optional operator-controlled HTTPS completion sink.
+  webhook_url: null
+  webhook_secret_env: LLM_GATEWAY_JOB_WEBHOOK_SECRET
+  webhook_timeout_seconds: 10
+  webhook_attempts: 3
+
+batch:
+  # Batch prompts are stored in the configured database until separately retained/removed.
+  allow_payload_persistence: false
+  max_requests: 100
+  max_payload_bytes: 10485760
+
+coordination:
+  # Recovery horizon; active requests renew every third of this interval.
+  lease_seconds: 300
+
+semantic_cache:
+  embedding_version: local-hash-v1
+  similarity_threshold: 0.92
+  dimensions: 256
+  ttl_seconds: 3600
+  max_entries_per_tenant: 1000
+  allow_sensitive_content: false
 
 idempotency:
   ttl_seconds: 86400

@@ -3,7 +3,46 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from llm_gateway.config import GatewayConfig, load_config
+from llm_gateway.config import FinOpsConfig, GatewayConfig, PlanConfig, load_config
+
+
+def test_finops_plans_are_strictly_validated():
+    plan = PlanConfig(
+        id="pro", pricing_version="v1", entitlements={"chat"},
+        budget_alert_percentages=[50, 80, 100], included_credit_usd=10,
+    )
+    assert FinOpsConfig(plans=[plan]).plans[0].pricing_version == "v1"
+    with pytest.raises(ValueError, match="unique"):
+        FinOpsConfig(plans=[plan, plan])
+    with pytest.raises(ValueError, match="percentages"):
+        PlanConfig(id="bad", pricing_version="v1", budget_alert_percentages=[80, 50])
+
+
+def test_batch_requires_jobs_and_explicit_payload_persistence():
+    provider = {
+        "name": "p", "base_url": "https://example.test/v1", "api_key_value": "key",
+        "models": [{"name": "fast", "upstream_model": "model"}],
+    }
+    with pytest.raises(ValidationError, match="requires async_jobs"):
+        GatewayConfig.model_validate({
+            "mode": "multi", "features": {"batch_api": True}, "providers": [provider],
+        })
+    with pytest.raises(ValidationError, match="payload_persistence"):
+        GatewayConfig.model_validate({
+            "mode": "multi", "features": {"async_jobs": True, "batch_api": True},
+            "providers": [provider],
+        })
+    config = GatewayConfig.model_validate({
+        "mode": "multi", "features": {"async_jobs": True, "batch_api": True},
+        "batch": {"allow_payload_persistence": True}, "providers": [provider],
+    })
+    assert config.features.batch_api is True
+    with pytest.raises(ValidationError, match="content governance"):
+        GatewayConfig.model_validate({
+            "mode": "multi",
+            "features": {"async_jobs": True, "batch_api": True, "pii_detection": True},
+            "batch": {"allow_payload_persistence": True}, "providers": [provider],
+        })
 
 
 @pytest.mark.parametrize("buckets", ([1, 0.5], [0.5, 0.5], [0, 1], [1, float("inf")], []))

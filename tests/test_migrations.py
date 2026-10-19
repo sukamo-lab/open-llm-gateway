@@ -10,8 +10,10 @@ def test_sqlite_migrations_are_component_scoped_and_idempotent(tmp_path):
     assert sqlite_status(database, ("usage", "identity")) == {"usage": 0, "identity": 0}
 
     assert migrate_sqlite(database, ("usage",)) == {"usage": LATEST_VERSIONS["usage"]}
-    assert sqlite_status(database, ("usage", "identity")) == {"usage": 1, "identity": 0}
-    assert migrate_sqlite(database, ("usage",)) == {"usage": 1}
+    assert sqlite_status(database, ("usage", "identity")) == {
+        "usage": LATEST_VERSIONS["usage"], "identity": 0,
+    }
+    assert migrate_sqlite(database, ("usage",)) == {"usage": LATEST_VERSIONS["usage"]}
 
     with sqlite3.connect(database) as db:
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -20,7 +22,7 @@ def test_sqlite_migrations_are_component_scoped_and_idempotent(tmp_path):
 
     assert migrate_sqlite(database, ("identity",)) == {"identity": LATEST_VERSIONS["identity"]}
     assert sqlite_status(database, ("usage", "identity")) == {
-        "usage": 1, "identity": LATEST_VERSIONS["identity"],
+        "usage": LATEST_VERSIONS["usage"], "identity": LATEST_VERSIONS["identity"],
     }
 
 

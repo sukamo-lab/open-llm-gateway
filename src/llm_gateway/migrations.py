@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-LATEST_VERSIONS = {"usage": 1, "identity": 3, "idempotency": 1, "cache": 1, "audit": 1}
+LATEST_VERSIONS = {"usage": 3, "identity": 5, "idempotency": 1, "cache": 1, "audit": 1, "jobs": 2, "coordination": 1}
 
 
 def _validate_components(components: Iterable[str]) -> tuple[str, ...]:
@@ -48,6 +48,28 @@ def _sqlite_usage_v1(db: sqlite3.Connection) -> None:
             db.execute(f"ALTER TABLE usage_events ADD COLUMN {column} {definition}")
     db.execute("CREATE INDEX IF NOT EXISTS usage_provider_time ON usage_events(provider, created_at)")
     db.execute("CREATE INDEX IF NOT EXISTS usage_consumer_time ON usage_events(consumer_id, created_at)")
+
+
+def _sqlite_usage_v2(db: sqlite3.Connection) -> None:
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS usage_export_checkpoints (
+        sink_id TEXT PRIMARY KEY, after_timestamp REAL NOT NULL,
+        after_request_id TEXT NOT NULL, page_sha256 TEXT NOT NULL,
+        updated_at REAL NOT NULL)"""
+    )
+
+
+def _sqlite_usage_v3(db: sqlite3.Connection) -> None:
+    db.execute(
+        """CREATE TRIGGER IF NOT EXISTS usage_completed_no_update
+        BEFORE UPDATE ON usage_events WHEN OLD.status='completed'
+        BEGIN SELECT RAISE(ABORT,'completed usage events are immutable'); END"""
+    )
+    db.execute(
+        """CREATE TRIGGER IF NOT EXISTS usage_completed_no_delete
+        BEFORE DELETE ON usage_events WHEN OLD.status='completed'
+        BEGIN SELECT RAISE(ABORT,'completed usage events are immutable'); END"""
+    )
 
 
 def _sqlite_identity_v1(db: sqlite3.Connection) -> None:
@@ -131,6 +153,33 @@ def _sqlite_identity_v3(db: sqlite3.Connection) -> None:
     db.execute("CREATE INDEX IF NOT EXISTS consumer_keys_principal ON consumer_keys(principal_id)")
 
 
+def _sqlite_identity_v4(db: sqlite3.Connection) -> None:
+    columns = {row[1] for row in db.execute("PRAGMA table_info(tenants)")}
+    if "plan_id" not in columns:
+        db.execute("ALTER TABLE tenants ADD COLUMN plan_id TEXT")
+    db.execute("CREATE INDEX IF NOT EXISTS tenants_plan ON tenants(plan_id)")
+
+
+def _sqlite_identity_v5(db: sqlite3.Connection) -> None:
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS tenant_credit_grants (
+        id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, amount_usd REAL NOT NULL,
+        source TEXT NOT NULL, created_at REAL NOT NULL, expires_at REAL,
+        CHECK(amount_usd>0), FOREIGN KEY(tenant_id) REFERENCES tenants(id))"""
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS tenant_credits_active ON tenant_credit_grants(tenant_id,expires_at)"
+    )
+    db.execute(
+        """CREATE TRIGGER IF NOT EXISTS tenant_credits_no_update BEFORE UPDATE
+        ON tenant_credit_grants BEGIN SELECT RAISE(ABORT,'credit grants are append-only'); END"""
+    )
+    db.execute(
+        """CREATE TRIGGER IF NOT EXISTS tenant_credits_no_delete BEFORE DELETE
+        ON tenant_credit_grants BEGIN SELECT RAISE(ABORT,'credit grants are append-only'); END"""
+    )
+
+
 def _sqlite_idempotency_v1(db: sqlite3.Connection) -> None:
     db.execute(
         """CREATE TABLE IF NOT EXISTS idempotency_records (
@@ -181,12 +230,63 @@ def _sqlite_audit_v1(db: sqlite3.Connection) -> None:
     )
 
 
+def _sqlite_jobs_v1(db: sqlite3.Connection) -> None:
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS async_jobs (
+        id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, kind TEXT NOT NULL,
+        state TEXT NOT NULL, payload_json TEXT NOT NULL, result_json TEXT,
+        error_code TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL,
+        lease_owner TEXT, lease_until REAL, cancel_requested INTEGER NOT NULL DEFAULT 0,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        CHECK(state IN ('queued','running','succeeded','failed','cancelled')))"""
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS async_jobs_tenant_created ON async_jobs(tenant_id,created_at)")
+    db.execute("CREATE INDEX IF NOT EXISTS async_jobs_state_lease ON async_jobs(state,lease_until)")
+
+
+def _sqlite_jobs_v2(db: sqlite3.Connection) -> None:
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS job_webhook_deliveries (
+        job_id TEXT PRIMARY KEY, event_json TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at REAL NOT NULL, lease_owner TEXT, lease_until REAL,
+        last_error TEXT, updated_at REAL NOT NULL,
+        CHECK(state IN ('pending','delivering','delivered')),
+        FOREIGN KEY(job_id) REFERENCES async_jobs(id))"""
+    )
+    db.execute(
+        """CREATE INDEX IF NOT EXISTS job_webhooks_due
+        ON job_webhook_deliveries(state,next_attempt_at,lease_until)"""
+    )
+
+
+def _sqlite_coordination_v1(db: sqlite3.Connection) -> None:
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS provider_circuits (
+        provider TEXT PRIMARY KEY, failures INTEGER NOT NULL DEFAULT 0,
+        open_until REAL NOT NULL DEFAULT 0, updated_at REAL NOT NULL)"""
+    )
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS provider_concurrency_leases (
+        token TEXT PRIMARY KEY, provider TEXT NOT NULL, expires_at REAL NOT NULL)"""
+    )
+    db.execute(
+        """CREATE INDEX IF NOT EXISTS provider_leases_provider_expiry
+        ON provider_concurrency_leases(provider,expires_at)"""
+    )
+
+
 SQLITE_MIGRATIONS = {
-    "usage": {1: _sqlite_usage_v1},
-    "identity": {1: _sqlite_identity_v1, 2: _sqlite_identity_v2, 3: _sqlite_identity_v3},
+    "usage": {1: _sqlite_usage_v1, 2: _sqlite_usage_v2, 3: _sqlite_usage_v3},
+    "identity": {
+        1: _sqlite_identity_v1, 2: _sqlite_identity_v2, 3: _sqlite_identity_v3,
+        4: _sqlite_identity_v4, 5: _sqlite_identity_v5,
+    },
     "idempotency": {1: _sqlite_idempotency_v1},
     "cache": {1: _sqlite_cache_v1},
     "audit": {1: _sqlite_audit_v1},
+    "jobs": {1: _sqlite_jobs_v1, 2: _sqlite_jobs_v2},
+    "coordination": {1: _sqlite_coordination_v1},
 }
 
 
@@ -294,6 +394,27 @@ async def _postgres_migration(db, component: str, version: int) -> None:
             CREATE INDEX IF NOT EXISTS usage_provider_time ON usage_events(provider, created_at);
             CREATE INDEX IF NOT EXISTS usage_consumer_time ON usage_events(consumer_id, created_at);"""
         )
+    elif (component, version) == ("usage", 2):
+        await db.execute(
+            """CREATE TABLE IF NOT EXISTS usage_export_checkpoints (
+              sink_id TEXT PRIMARY KEY, after_timestamp DOUBLE PRECISION NOT NULL,
+              after_request_id TEXT NOT NULL, page_sha256 TEXT NOT NULL,
+              updated_at DOUBLE PRECISION NOT NULL
+            );"""
+        )
+    elif (component, version) == ("usage", 3):
+        await db.execute(
+            """CREATE OR REPLACE FUNCTION reject_completed_usage_mutation() RETURNS trigger AS $$
+            BEGIN
+              IF OLD.status = 'completed' THEN
+                RAISE EXCEPTION 'completed usage events are immutable';
+              END IF;
+              RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+            END; $$ LANGUAGE plpgsql;
+            DROP TRIGGER IF EXISTS usage_completed_no_mutation ON usage_events;
+            CREATE TRIGGER usage_completed_no_mutation BEFORE UPDATE OR DELETE ON usage_events
+              FOR EACH ROW EXECUTE FUNCTION reject_completed_usage_mutation();"""
+        )
     elif (component, version) == ("identity", 1):
         await db.execute(
             """CREATE TABLE IF NOT EXISTS tenants (
@@ -352,6 +473,26 @@ async def _postgres_migration(db, component: str, version: int) -> None:
             CREATE INDEX IF NOT EXISTS role_bindings_principal ON role_bindings(principal_id);
             CREATE INDEX IF NOT EXISTS consumer_keys_principal ON consumer_keys(principal_id);"""
         )
+    elif (component, version) == ("identity", 4):
+        await db.execute(
+            """ALTER TABLE tenants ADD COLUMN IF NOT EXISTS plan_id TEXT;
+            CREATE INDEX IF NOT EXISTS tenants_plan ON tenants(plan_id);"""
+        )
+    elif (component, version) == ("identity", 5):
+        await db.execute(
+            """CREATE TABLE IF NOT EXISTS tenant_credit_grants (
+              id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id),
+              amount_usd DOUBLE PRECISION NOT NULL CHECK(amount_usd>0), source TEXT NOT NULL,
+              created_at DOUBLE PRECISION NOT NULL, expires_at DOUBLE PRECISION
+            );
+            CREATE INDEX IF NOT EXISTS tenant_credits_active
+              ON tenant_credit_grants(tenant_id,expires_at);
+            CREATE OR REPLACE FUNCTION reject_credit_grant_mutation() RETURNS trigger AS $$
+            BEGIN RAISE EXCEPTION 'credit grants are append-only'; END; $$ LANGUAGE plpgsql;
+            DROP TRIGGER IF EXISTS tenant_credits_no_mutation ON tenant_credit_grants;
+            CREATE TRIGGER tenant_credits_no_mutation BEFORE UPDATE OR DELETE ON tenant_credit_grants
+              FOR EACH ROW EXECUTE FUNCTION reject_credit_grant_mutation();"""
+        )
     elif (component, version) == ("idempotency", 1):
         await db.execute(
             """CREATE TABLE IF NOT EXISTS idempotency_records (
@@ -398,6 +539,47 @@ async def _postgres_migration(db, component: str, version: int) -> None:
             DROP TRIGGER IF EXISTS audit_events_no_update ON audit_events;
             CREATE TRIGGER audit_events_no_update BEFORE UPDATE OR DELETE ON audit_events
               FOR EACH ROW EXECUTE FUNCTION reject_audit_mutation();"""
+        )
+    elif (component, version) == ("jobs", 1):
+        await db.execute(
+            """CREATE TABLE IF NOT EXISTS async_jobs (
+              id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, kind TEXT NOT NULL,
+              state TEXT NOT NULL, payload_json TEXT NOT NULL, result_json TEXT,
+              error_code TEXT, created_at DOUBLE PRECISION NOT NULL,
+              updated_at DOUBLE PRECISION NOT NULL, lease_owner TEXT,
+              lease_until DOUBLE PRECISION, cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
+              attempts INTEGER NOT NULL DEFAULT 0,
+              CHECK(state IN ('queued','running','succeeded','failed','cancelled'))
+            );
+            CREATE INDEX IF NOT EXISTS async_jobs_tenant_created ON async_jobs(tenant_id,created_at);
+            CREATE INDEX IF NOT EXISTS async_jobs_state_lease ON async_jobs(state,lease_until);"""
+        )
+    elif (component, version) == ("jobs", 2):
+        await db.execute(
+            """CREATE TABLE IF NOT EXISTS job_webhook_deliveries (
+              job_id TEXT PRIMARY KEY REFERENCES async_jobs(id), event_json TEXT NOT NULL,
+              state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+              next_attempt_at DOUBLE PRECISION NOT NULL, lease_owner TEXT,
+              lease_until DOUBLE PRECISION, last_error TEXT,
+              updated_at DOUBLE PRECISION NOT NULL,
+              CHECK(state IN ('pending','delivering','delivered'))
+            );
+            CREATE INDEX IF NOT EXISTS job_webhooks_due
+              ON job_webhook_deliveries(state,next_attempt_at,lease_until);"""
+        )
+    elif (component, version) == ("coordination", 1):
+        await db.execute(
+            """CREATE TABLE IF NOT EXISTS provider_circuits (
+              provider TEXT PRIMARY KEY, failures INTEGER NOT NULL DEFAULT 0,
+              open_until DOUBLE PRECISION NOT NULL DEFAULT 0,
+              updated_at DOUBLE PRECISION NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS provider_concurrency_leases (
+              token TEXT PRIMARY KEY, provider TEXT NOT NULL,
+              expires_at DOUBLE PRECISION NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS provider_leases_provider_expiry
+              ON provider_concurrency_leases(provider,expires_at);"""
         )
     else:
         raise RuntimeError(f"missing PostgreSQL migration {component} version {version}")

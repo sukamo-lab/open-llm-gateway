@@ -169,10 +169,51 @@ class QuotaStore:
             "cost_usd": round(row[3], 8), "last_used_at": row[4],
         } for row in rows]
 
+    async def usage_export(
+        self, after: float = 0, after_id: str = "", limit: int = 1000,
+    ) -> list[dict[str, object]]:
+        async with self._lock:
+            with self._connect() as db:
+                db.row_factory = sqlite3.Row
+                rows = db.execute(
+                    """SELECT request_id,created_at,provider,model,consumer_id tenant_id,
+                    requests,tokens,prompt_tokens,completion_tokens,cost_usd,status
+                    FROM usage_events WHERE status='completed'
+                    AND (created_at>? OR (created_at=? AND request_id>?))
+                    ORDER BY created_at,request_id LIMIT ?""", (after, after, after_id, limit),
+                ).fetchall()
+        return [dict(row) for row in rows]
+
+    async def export_checkpoint(self, sink_id: str) -> tuple[float, str]:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT after_timestamp,after_request_id FROM usage_export_checkpoints WHERE sink_id=?",
+                (sink_id,),
+            ).fetchone()
+        return (float(row[0]), str(row[1])) if row else (0, "")
+
+    async def save_export_checkpoint(
+        self, sink_id: str, after: float, after_id: str, page_sha256: str,
+    ) -> None:
+        async with self._lock:
+            with self._connect() as db:
+                db.execute(
+                    """INSERT INTO usage_export_checkpoints
+                    (sink_id,after_timestamp,after_request_id,page_sha256,updated_at)
+                    VALUES(?,?,?,?,?) ON CONFLICT(sink_id) DO UPDATE SET
+                    after_timestamp=excluded.after_timestamp,
+                    after_request_id=excluded.after_request_id,
+                    page_sha256=excluded.page_sha256,updated_at=excluded.updated_at""",
+                    (sink_id, after, after_id, page_sha256, time.time()),
+                )
+
     async def cleanup(self, before_timestamp: float) -> int:
         async with self._lock:
             with self._connect() as db:
-                cursor = db.execute("DELETE FROM usage_events WHERE created_at < ?", (before_timestamp,))
+                cursor = db.execute(
+                    "DELETE FROM usage_events WHERE created_at < ? AND status!='completed'",
+                    (before_timestamp,),
+                )
         return cursor.rowcount
 
 
@@ -202,6 +243,19 @@ class NullQuotaStore:
 
     async def consumer_snapshot(self) -> list[dict[str, object]]:
         return []
+
+    async def usage_export(
+        self, after: float = 0, after_id: str = "", limit: int = 1000,
+    ) -> list[dict[str, object]]:
+        return []
+
+    async def export_checkpoint(self, sink_id: str) -> tuple[float, str]:
+        return 0, ""
+
+    async def save_export_checkpoint(
+        self, sink_id: str, after: float, after_id: str, page_sha256: str,
+    ) -> None:
+        return None
 
     async def cleanup(self, before_timestamp: float) -> int:
         return 0
