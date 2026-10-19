@@ -67,7 +67,7 @@ class IdentityStore:
         # token fingerprint, not a human
         # password verifier; a password KDF would add latency without improving
         # resistance to guessing and would invalidate existing stored hashes.
-        return hashlib.sha256(token.encode("utf-8")).hexdigest()  # lgtm[py/weak-sensitive-data-hashing]
+        return hashlib.sha256(token.encode("utf-8"), usedforsecurity=False).hexdigest()
 
     def _limits(self, row: sqlite3.Row) -> tuple[Limit, ...]:
         result = []

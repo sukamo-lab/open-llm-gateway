@@ -59,7 +59,8 @@ class FakeCoordinator:
 
 
 @pytest.mark.asyncio
-async def test_router_uses_distributed_circuit_and_concurrency_coordinator(tmp_path):
+async def test_router_uses_distributed_circuit_and_concurrency_coordinator(tmp_path, monkeypatch):
+    monkeypatch.setenv("KEY", "test-key")
     config = make_config(tmp_path, [provider(
         "shared", "free", "KEY", [{"name": "chat", "upstream_model": "model"}],
     )])
