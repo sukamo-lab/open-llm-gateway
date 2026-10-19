@@ -6,6 +6,7 @@ import math
 import random
 import uuid
 import asyncio
+from contextlib import asynccontextmanager
 import time
 from datetime import datetime, timezone
 from dataclasses import dataclass
@@ -41,13 +42,14 @@ class Candidate:
 class GatewayRouter:
     def __init__(
         self, config: GatewayConfig, quota: QuotaStore, client: httpx.AsyncClient,
-        metrics: Metrics | None = None, telemetry=None,
+        metrics: Metrics | None = None, telemetry=None, coordinator=None,
     ):
         self.config = config
         self.quota = quota
         self.client = client
         self.metrics = metrics or Metrics()
         self.telemetry = telemetry
+        self.coordinator = coordinator
         self.log_provider_attempts = bool(
             config.features.structured_logging and config.observability.log_provider_attempts
         )
@@ -64,13 +66,26 @@ class GatewayRouter:
     def _available(self, provider: ProviderConfig) -> bool:
         if not self.config.features.circuit_breaker:
             return True
+        if self.coordinator is not None:
+            return self.coordinator.available(provider.name)
         return self._open_until.get(provider.name, 0) <= time.monotonic()
+
+    @asynccontextmanager
+    async def _slot(self, provider: ProviderConfig):
+        if self.coordinator is not None:
+            async with self.coordinator.slot(provider.name, provider.max_concurrency):
+                yield
+        else:
+            async with self._semaphores[provider.name]:
+                yield
 
     async def _succeeded(self, candidate: Candidate) -> None:
         provider = candidate.provider
         if self.config.features.circuit_breaker:
             self._failures[provider.name] = 0
             self._open_until.pop(provider.name, None)
+            if self.coordinator is not None:
+                await self.coordinator.succeeded(provider.name)
         await self.metrics.provider(
             provider.name, "success", candidate.model.name, provider.tier
         )
@@ -88,6 +103,10 @@ class GatewayRouter:
         self._failures[provider.name] = failures
         if failures >= provider.failure_threshold:
             self._open_until[provider.name] = time.monotonic() + provider.cooldown_seconds
+        if self.coordinator is not None:
+            await self.coordinator.failed(
+                provider.name, provider.failure_threshold, provider.cooldown_seconds,
+            )
         await self.metrics.provider(
             provider.name, "failure", candidate.model.name, provider.tier
         )
@@ -365,6 +384,8 @@ class GatewayRouter:
         self, payload: dict[str, Any], consumer_id: str | None = None,
         consumer_limits: tuple[Any, ...] = (),
     ) -> tuple[dict[str, Any], str, str]:
+        if self.coordinator is not None:
+            await self.coordinator.refresh()
         requested_model = str(payload.get("model", "auto"))
         requested_provider = payload.get("provider")
         if requested_provider and not self.config.routing.allow_provider_override:
@@ -390,7 +411,7 @@ class GatewayRouter:
                 errors.append(f"{candidate.provider.name}: local quota exhausted")
                 continue
             try:
-                async with self._semaphores[candidate.provider.name]:
+                async with self._slot(candidate.provider):
                     response, upstream_attempts = await self._post_with_retries(
                         candidate, payload, "embeddings"
                     )
@@ -546,6 +567,8 @@ class GatewayRouter:
         self, payload: dict[str, Any], consumer_id: str | None = None,
         consumer_limits: tuple[Any, ...] = (),
     ) -> tuple[bytes, str, str, httpx.Headers]:
+        if self.coordinator is not None:
+            await self.coordinator.refresh()
         requested_model = str(payload.get("model", "auto"))
         requested_provider = payload.get("provider")
         if requested_provider and not self.config.routing.allow_provider_override:
@@ -570,7 +593,7 @@ class GatewayRouter:
                 errors.append(f"{candidate.provider.name}: local quota exhausted")
                 continue
             try:
-                async with self._semaphores[candidate.provider.name]:
+                async with self._slot(candidate.provider):
                     response, _attempts = await self._post_with_retries(
                         candidate, payload, "audio_speech"
                     )
@@ -614,6 +637,8 @@ class GatewayRouter:
     ) -> tuple[dict[str, Any], str, str]:
         from .images_api import validate_image_response
 
+        if self.coordinator is not None:
+            await self.coordinator.refresh()
         requested_model = str(payload.get("model", "auto"))
         requested_provider = payload.get("provider")
         if requested_provider and not self.config.routing.allow_provider_override:
@@ -639,7 +664,7 @@ class GatewayRouter:
                 errors.append(f"{candidate.provider.name}: local quota exhausted")
                 continue
             try:
-                async with self._semaphores[candidate.provider.name]:
+                async with self._slot(candidate.provider):
                     response, attempts = await self._post_with_retries(
                         candidate, payload, "image_generation"
                     )
@@ -706,6 +731,8 @@ class GatewayRouter:
         consumer_limits: tuple[Any, ...] = (),
         require_injection_safe: bool = False,
     ) -> tuple[dict[str, Any], str, str]:
+        if self.coordinator is not None:
+            await self.coordinator.refresh()
         requested_model = str(payload.get("model", "auto"))
         requested_provider = payload.get("provider")
         estimate = self.estimate_tokens(payload)
@@ -736,7 +763,7 @@ class GatewayRouter:
                 errors.append(f"{candidate.provider.name}: local quota exhausted")
                 continue
             try:
-                async with self._semaphores[candidate.provider.name]:
+                async with self._slot(candidate.provider):
                     response, upstream_attempts = await self._post_with_retries(candidate, payload)
             except httpx.HTTPError as exc:
                 await self.quota.reconcile(reservation, None, False)

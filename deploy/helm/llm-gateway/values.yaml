@@ -1,0 +1,33 @@
+replicaCount: 2
+image:
+  repository: ghcr.io/sukamo-lab/llm-gateway
+  tag: "0.9.0"
+  pullPolicy: IfNotPresent
+service:
+  port: 8000
+resources:
+  requests: {cpu: 100m, memory: 256Mi}
+  limits: {cpu: "1", memory: 1Gi}
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+networkPolicy:
+  enabled: true
+  ingressNamespaceSelector: {}
+  egressCIDRs: []
+config:
+  existingConfigMap: llm-gateway-config
+secrets:
+  existingSecret: llm-gateway-secrets
+migrations:
+  enabled: true
+podSecurityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities: {drop: [ALL]}

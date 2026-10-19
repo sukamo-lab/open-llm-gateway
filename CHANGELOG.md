@@ -4,6 +4,17 @@ All notable product changes are recorded here. The project follows [Semantic Ver
 
 ## [Unreleased]
 
+### Added
+
+- First `FIN-PLAN-001` slice: opt-in versioned tenant plans, persistent plan assignment, enforced API entitlements, plan-derived quota ceilings, append-only expiring credit grants, an administrator plan catalog, and usage-backed credit/budget status.
+- First `FIN-EXPORT-001` slice: opt-in deterministic completed-usage export with composite cursors, page checksums, bounded reconciliation totals, replay-safe delivery checkpoints, and database-enforced finalized-row immutability.
+- First `JOB-ASYNC-001` slice: durable SQLite/PostgreSQL job state, tenant-isolated status/cancellation, leased workers, and a crash-recoverable signed-webhook outbox.
+- First `API-BATCH-001` slice: bounded durable non-streaming chat batches with hosted workers, per-item results, status/cancellation, tenant isolation, and explicit sensitive-payload persistence acknowledgement.
+- First `RES-DISTCB-001` slice: shared PostgreSQL circuit state and atomic crash-expiring, actively renewed provider concurrency leases.
+- First `CACHE-SEM-001` slice: tenant-isolated semantic chat caching with pinned vector versions, request scoping, privacy validation, thresholds, and TTLs.
+- First `DEPLOY-HELM-001` slice: hardened Helm chart with migration hooks, autoscaling, disruption budget, network policy, restricted pod security, and external-secret example.
+- First `OPS-DR-001` slice: verifiable SQLite backup/manifests, guarded restore, and PostgreSQL/multi-replica disaster-recovery drill guidance.
+
 ## [0.9.0] - 2026-10-17
 
 ### Added

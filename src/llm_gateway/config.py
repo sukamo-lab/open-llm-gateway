@@ -155,6 +155,11 @@ class GatewayConfig(StrictModel):
     routing: "RoutingConfig" = Field(default_factory=lambda: RoutingConfig())
     observability: "ObservabilityConfig" = Field(default_factory=lambda: ObservabilityConfig())
     accounting: "AccountingConfig" = Field(default_factory=lambda: AccountingConfig())
+    finops: "FinOpsConfig" = Field(default_factory=lambda: FinOpsConfig())
+    jobs: "JobsConfig" = Field(default_factory=lambda: JobsConfig())
+    batch: "BatchConfig" = Field(default_factory=lambda: BatchConfig())
+    coordination: "CoordinationConfig" = Field(default_factory=lambda: CoordinationConfig())
+    semantic_cache: "SemanticCacheConfig" = Field(default_factory=lambda: SemanticCacheConfig())
     idempotency: "IdempotencyConfig" = Field(default_factory=lambda: IdempotencyConfig())
     cache: "CacheConfig" = Field(default_factory=lambda: CacheConfig())
     telemetry: "TelemetryConfig" = Field(default_factory=lambda: TelemetryConfig())
@@ -191,6 +196,12 @@ class GatewayConfig(StrictModel):
                 "audit_ledger": False,
                 "envelope_encryption": False,
                 "residency_enforcement": False,
+                "finops_plans": False,
+                "finops_export": False,
+                "async_jobs": False,
+                "batch_api": False,
+                "distributed_resilience": False,
+                "semantic_cache": False,
                 "tenant_quotas": False, "provider_quotas": False,
                 "usage_accounting": False, "cost_tracking": False,
                 "metrics": False, "circuit_breaker": True, "structured_logging": False,
@@ -219,6 +230,12 @@ class GatewayConfig(StrictModel):
                 "audit_ledger": False,
                 "envelope_encryption": False,
                 "residency_enforcement": False,
+                "finops_plans": False,
+                "finops_export": False,
+                "async_jobs": False,
+                "batch_api": False,
+                "distributed_resilience": False,
+                "semantic_cache": False,
                 "tenant_quotas": True, "provider_quotas": True,
                 "usage_accounting": True, "cost_tracking": True,
                 "metrics": True, "circuit_breaker": True, "structured_logging": True,
@@ -261,6 +278,44 @@ class GatewayConfig(StrictModel):
             raise ValueError("audit_ledger requires admin_api")
         if self.features.tenant_quotas and not self.features.managed_keys:
             raise ValueError("tenant_quotas requires managed_keys")
+        if self.features.finops_plans and not (
+            self.features.managed_keys and self.features.admin_api and self.features.tenant_quotas
+        ):
+            raise ValueError("finops_plans requires managed_keys, admin_api, and tenant_quotas")
+        if self.features.finops_plans and not self.finops.plans:
+            raise ValueError("finops_plans requires at least one configured plan")
+        if self.features.finops_export and not (
+            self.features.admin_api and self.features.usage_accounting and self.features.audit_ledger
+        ):
+            raise ValueError("finops_export requires admin_api, usage_accounting, and audit_ledger")
+        if self.features.finops_export and not self.finops.export_url:
+            raise ValueError("finops_export requires finops.export_url")
+        if self.features.async_jobs and not (self.features.authentication and self.features.managed_keys):
+            raise ValueError("async_jobs requires authentication and managed_keys")
+        if self.features.async_jobs and self.jobs.webhook_url and not self.jobs.webhook_secret():
+            raise ValueError(f"job webhook requires {self.jobs.webhook_secret_env}")
+        if self.features.batch_api and not self.features.async_jobs:
+            raise ValueError("batch_api requires async_jobs")
+        if self.features.batch_api and not self.batch.allow_payload_persistence:
+            raise ValueError("batch_api requires batch.allow_payload_persistence acknowledgement")
+        if self.features.batch_api and (
+            self.features.pii_detection
+            or self.features.moderation
+            or self.features.prompt_injection
+        ):
+            raise ValueError(
+                "batch_api cannot be combined with request content governance in this release"
+            )
+        if self.features.distributed_resilience and not self.database.startswith(("postgresql://", "postgres://")):
+            raise ValueError("distributed_resilience requires PostgreSQL")
+        if self.features.semantic_cache and not self.features.embeddings_api:
+            raise ValueError("semantic_cache requires embeddings_api")
+        if (
+            self.features.semantic_cache
+            and not self.semantic_cache.allow_sensitive_content
+            and not self.features.pii_detection
+        ):
+            raise ValueError("semantic_cache requires pii_detection or allow_sensitive_content")
         if self.features.cost_tracking and not self.features.usage_accounting:
             raise ValueError("cost_tracking requires usage_accounting")
         if self.features.model_discovery and not self.features.admin_api:
@@ -546,6 +601,85 @@ class AccountingConfig(StrictModel):
     retention_days: int = Field(default=90, ge=30)
 
 
+class PlanConfig(StrictModel):
+    id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    pricing_version: str = Field(min_length=1, max_length=64)
+    entitlements: set[str] = Field(default_factory=set, max_length=100)
+    requests_per_minute: int | None = Field(default=None, gt=0)
+    tokens_per_day: int | None = Field(default=None, gt=0)
+    cost_per_30_days: float | None = Field(default=None, gt=0)
+    included_credit_usd: float = Field(default=0, ge=0)
+    budget_alert_percentages: list[int] = Field(default_factory=list, max_length=20)
+
+    @model_validator(mode="after")
+    def valid_plan(self) -> "PlanConfig":
+        if any(not item or len(item) > 128 for item in self.entitlements):
+            raise ValueError("plan entitlements must be bounded non-empty strings")
+        if self.budget_alert_percentages != sorted(set(self.budget_alert_percentages)) or any(
+            item <= 0 or item > 100 for item in self.budget_alert_percentages
+        ):
+            raise ValueError("budget alert percentages must be unique, increasing, and between 1 and 100")
+        return self
+
+
+class FinOpsConfig(StrictModel):
+    plans: list[PlanConfig] = Field(default_factory=list, max_length=1000)
+    export_url: str | None = None
+    export_token_env: str | None = None
+    export_sink_id: str = Field(default="default", min_length=1, max_length=128)
+    export_batch_size: int = Field(default=1000, ge=1, le=10_000)
+    export_timeout_seconds: float = Field(default=10, gt=0, le=60)
+
+    @model_validator(mode="after")
+    def unique_plans(self) -> "FinOpsConfig":
+        ids = [item.id for item in self.plans]
+        if len(ids) != len(set(ids)):
+            raise ValueError("finops plan ids must be unique")
+        if self.export_url and not self.export_url.startswith("https://"):
+            raise ValueError("finops export_url must use HTTPS")
+        return self
+
+    def export_token(self) -> str | None:
+        return os.getenv(self.export_token_env) if self.export_token_env else None
+
+
+class JobsConfig(StrictModel):
+    lease_seconds: int = Field(default=60, ge=5, le=3600)
+    poll_interval_seconds: float = Field(default=0.25, ge=0.01, le=30)
+    webhook_url: str | None = None
+    webhook_secret_env: str = "LLM_GATEWAY_JOB_WEBHOOK_SECRET"
+    webhook_timeout_seconds: float = Field(default=10, gt=0, le=60)
+    webhook_attempts: int = Field(default=3, ge=1, le=10)
+
+    def webhook_secret(self) -> str | None:
+        return os.getenv(self.webhook_secret_env) or None
+
+    @model_validator(mode="after")
+    def valid_webhook(self) -> "JobsConfig":
+        if self.webhook_url and not self.webhook_url.startswith("https://"):
+            raise ValueError("job webhook_url must use HTTPS")
+        return self
+
+
+class BatchConfig(StrictModel):
+    allow_payload_persistence: bool = False
+    max_requests: int = Field(default=100, ge=1, le=10_000)
+    max_payload_bytes: int = Field(default=10_485_760, ge=1024, le=67_108_864)
+
+
+class CoordinationConfig(StrictModel):
+    lease_seconds: float = Field(default=300, ge=5, le=3600)
+
+
+class SemanticCacheConfig(StrictModel):
+    embedding_version: str = Field(default="local-hash-v1", min_length=1, max_length=128)
+    similarity_threshold: float = Field(default=0.92, gt=0, le=1)
+    dimensions: int = Field(default=256, ge=32, le=4096)
+    ttl_seconds: int = Field(default=3600, ge=1, le=604800)
+    max_entries_per_tenant: int = Field(default=1000, ge=1, le=100_000)
+    allow_sensitive_content: bool = False
+
+
 class IdempotencyConfig(StrictModel):
     ttl_seconds: int = Field(default=86400, ge=60, le=604800)
     lease_seconds: int = Field(default=180, ge=5, le=3600)
@@ -796,6 +930,12 @@ class FeatureConfig(StrictModel):
     audit_ledger: bool | None = None
     envelope_encryption: bool | None = None
     residency_enforcement: bool | None = None
+    finops_plans: bool | None = None
+    finops_export: bool | None = None
+    async_jobs: bool | None = None
+    batch_api: bool | None = None
+    distributed_resilience: bool | None = None
+    semantic_cache: bool | None = None
     tenant_quotas: bool | None = None
     provider_quotas: bool | None = None
     usage_accounting: bool | None = None

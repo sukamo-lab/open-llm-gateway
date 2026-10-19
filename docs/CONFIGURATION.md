@@ -338,5 +338,33 @@ When `allow_client_bypass` is true, `Cache-Control: no-cache` or `no-store` bypa
 
 Price fields are metadata expressed in USD per million tokens. Keep prices current when vendors change them.
 
-`accounting.retention_days` controls usage-row retention and must be at least 30 days so tenant rolling spend limits remain enforceable. Cleanup runs during startup.
+`accounting.retention_days` controls retention of failed and abandoned usage reservations and must be at least 30 days so tenant rolling limits remain enforceable. Cleanup runs during startup. Completed rows are immutable and retained for billing reconciliation.
+
+## Versioned tenant plans
+
+Set `features.finops_plans: true` to enable the first `FIN-PLAN-001` slice. This requires managed keys, the admin API, and tenant quotas. Define immutable plan identifiers under `finops.plans` with a required `pricing_version`, descriptive entitlements, and optional request, token, and 30-day spend ceilings. Assign a plan with `plan_id` when creating or updating a tenant. `GET /admin/plans` returns the configured catalog without secrets.
+
+Plan quota ceilings are enforced in addition to tenant-specific ceilings, so the stricter applicable limit wins. Entitlements use the operation names `chat`, `responses`, `embeddings`, `moderations`, `audio`, and `images`; a tenant assigned to a plan receives HTTP 403 for an operation not listed. Changing a plan definition takes effect after restart; use a new `pricing_version` for every commercial change.
+
+`POST /admin/tenants/{tenant_id}/credits` appends a purchased or promotional credit grant with a required source and optional lifetime; `GET /admin/tenants/{tenant_id}/credits` returns the immutable ledger. `GET /admin/tenants/{tenant_id}/budget` combines unexpired purchased grants with the plan's included credit, then calculates the usage-backed remaining balance, gross budget utilization, and triggered thresholds from shared accounting data. It is safe to poll and produces no duplicate notifications. External push alert delivery remains pending.
+
+## Durable jobs
+
+`features.async_jobs` enables the tenant-isolated durable job store and `GET`/`DELETE /v1/jobs/{job_id}` status and cancellation endpoints. It requires authentication and managed keys. SQLite is appropriate for one process; PostgreSQL provides shared atomic leasing for multiple workers. Expired running leases are reclaimable, and only the current lease owner can complete a job. An optional operator-controlled HTTPS sink receives HMAC-SHA256 signed completion events with stable idempotency keys. Terminal results and outbox events commit atomically; delivery uses leased, exponentially rescheduled attempts that another worker can recover after process termination.
+
+## Batch API
+
+`features.batch_api` enables `POST /v1/batches` plus tenant-isolated `GET` and `DELETE /v1/batches/{job_id}`. It requires durable jobs and `batch.allow_payload_persistence: true`, an explicit acknowledgement that complete request bodies are stored in the configured database. `max_requests` and `max_payload_bytes` bound each submission. Items require unique `custom_id` values and non-streaming chat bodies; a hosted leased worker processes items in input order and stores per-item responses or safe error codes. PostgreSQL supports competing API/worker replicas; SQLite is limited to one process. This release fails configuration validation if Batch is combined with PII, moderation, or prompt-injection processing, preventing asynchronous work from bypassing request content governance until those stages are available in the worker pipeline.
+
+## Usage export
+
+`features.finops_export` requires the admin API, accounting, audit ledger, and an HTTPS `finops.export_url`. Optional bearer authentication comes from `finops.export_token_env`. `export_sink_id` identifies the durable checkpoint, so change it only when intentionally starting a new independent export stream. Delivery is at-least-once and advances the checkpoint only after a 2xx sink response.
+
+## Distributed resilience
+
+`features.distributed_resilience` requires PostgreSQL. Provider failure/success transitions update shared circuit rows, every operation refreshes circuit state before selection, and provider calls acquire atomic expiring concurrency leases. Active requests renew their leases; process termination stops renewal and makes the slot reclaimable after `coordination.lease_seconds`. Disabled mode retains the original in-process dictionaries and semaphores and initializes no coordination schema or pool.
+
+## Semantic cache
+
+`features.semantic_cache` enables tenant-partitioned similarity lookup for non-streaming chat after input governance and before quota/provider work. The embedding version, request scope, TTL, similarity threshold, and tenant are all part of eligibility. Tool definitions, response format, sampling parameters, model, reasoning settings, and message-role shape must match exactly. Set `allow_sensitive_content: true` only after approving in-memory prompt/response retention; otherwise PII processing must be enabled. The current partial backend is process-local and uses a bounded dependency-free token-hash vectorizer rather than a provider embedding model.
 

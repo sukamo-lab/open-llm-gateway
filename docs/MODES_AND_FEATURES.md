@@ -16,6 +16,12 @@ features:
   audit_ledger: false
   envelope_encryption: false
   residency_enforcement: false
+  finops_plans: false
+  finops_export: false
+  async_jobs: false
+  batch_api: false
+  distributed_resilience: false
+  semantic_cache: false
   tenant_quotas: false
   provider_quotas: false
   usage_accounting: false
@@ -63,6 +69,12 @@ features:
   audit_ledger: false
   envelope_encryption: false
   residency_enforcement: false
+  finops_plans: false
+  finops_export: false
+  async_jobs: false
+  batch_api: false
+  distributed_resilience: false
+  semantic_cache: false
   tenant_quotas: true
   provider_quotas: true
   usage_accounting: true
@@ -106,6 +118,12 @@ Disabled features are not merely hidden:
 - `audit_ledger: false` initializes no audit schema, hashing, export client, or audit endpoints. When enabled, security administration emits content-safe append-only events.
 - `envelope_encryption: false` imports no cryptographic implementation and preserves existing persistence behavior. When enabled, persisted cache and idempotency responses use record-bound authenticated envelopes.
 - `residency_enforcement: false` preserves ordinary routing-policy selection. When enabled, every covered request is pinned to the configured deny-fallback residency policy and overrides cannot bypass it.
+- `finops_plans: false` creates no plan policy and removes `/admin/plans`. When enabled, configured versioned plans can be assigned to tenants and their request, token, and spend ceilings are added to tenant quota enforcement.
+- `finops_export: false` removes the completed-usage export and reconciliation endpoints. When enabled, it reads bounded pages from the shared accounting store and requires the audit ledger.
+- `async_jobs: false` creates no job schema or connection pool and removes job status/cancellation routes. It requires managed authentication when enabled.
+- `batch_api: false` removes batch submission/status/cancellation routes and starts no workers. Enabling it requires durable jobs plus explicit `batch.allow_payload_persistence: true` because complete request bodies are queued in the configured database.
+- `distributed_resilience: false` preserves process-local circuits and semaphores. When enabled it requires PostgreSQL and shares circuit state plus crash-expiring concurrency leases across replicas.
+- `semantic_cache: false` imports no vectorizer, retains no semantic index, and performs no similarity work. Enabled mode requires embeddings capability plus either PII processing or explicit sensitive-content retention approval.
 - `metrics: false` removes `/metrics` and uses a no-op metrics object.
 - disabling `provider_quotas`, `tenant_quotas`, and `usage_accounting` selects a no-I/O quota implementation.
 - `tenant_quotas: false` removes tenant-limit checks from the request path.
@@ -130,7 +148,7 @@ Disabled features are not merely hidden:
 - `config_reload: false` removes `/admin/config/reload` and allocates no reload pools or generations.
 - `authentication: false` removes consumer authentication checks, but is accepted only on a localhost bind.
 
-Invalid dependency combinations fail configuration validation: managed keys require authentication and the admin API; identity hierarchy requires authentication, the admin API, and managed keys; RBAC requires identity hierarchy; tenant quotas require managed keys; cost tracking requires accounting; configuration reload requires the admin API and cannot be combined with exact caching in its current routing-only form.
+Invalid dependency combinations fail configuration validation: managed keys require authentication and the admin API; identity hierarchy requires authentication, the admin API, and managed keys; RBAC requires identity hierarchy; tenant quotas require managed keys; FinOps plans require managed keys, the admin API, tenant quotas, and at least one plan; cost tracking requires accounting; configuration reload requires the admin API and cannot be combined with exact caching in its current routing-only form.
 
 ## Latency
 

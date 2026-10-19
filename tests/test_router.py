@@ -1,9 +1,10 @@
 import httpx
 import pytest
+from contextlib import asynccontextmanager
 
 from llm_gateway.config import GatewayConfig, RoutingPolicyConfig
 from llm_gateway.metrics import Metrics
-from llm_gateway.quota import QuotaStore
+from llm_gateway.quota import NullQuotaStore, QuotaStore
 from llm_gateway.router import GatewayRouter, NoModelAvailable
 
 
@@ -30,6 +31,49 @@ class BrokenAfterFirstChunk(httpx.AsyncByteStream):
     async def __aiter__(self):
         yield b"data: first\n\n"
         raise httpx.ReadError("stream interrupted")
+
+
+class FakeCoordinator:
+    def __init__(self):
+        self.open = False
+        self.events = []
+
+    async def refresh(self):
+        self.events.append("refresh")
+
+    def available(self, _provider):
+        return not self.open
+
+    async def failed(self, provider_name, threshold, cooldown):
+        self.events.append(("failed", provider_name, threshold, cooldown))
+        self.open = True
+
+    async def succeeded(self, provider_name):
+        self.events.append(("succeeded", provider_name))
+        self.open = False
+
+    @asynccontextmanager
+    async def slot(self, provider_name, limit):
+        self.events.append(("slot", provider_name, limit))
+        yield
+
+
+@pytest.mark.asyncio
+async def test_router_uses_distributed_circuit_and_concurrency_coordinator(tmp_path):
+    config = make_config(tmp_path, [provider(
+        "shared", "free", "KEY", [{"name": "chat", "upstream_model": "model"}],
+    )])
+    coordinator = FakeCoordinator()
+    async with httpx.AsyncClient() as client:
+        router = GatewayRouter(config, NullQuotaStore(), client, coordinator=coordinator)
+        candidate = router.candidates("chat", False, None, {"chat"})[0]
+        await router._failed(candidate)
+        assert not router._available(candidate.provider)
+        await router._succeeded(candidate)
+        assert router._available(candidate.provider)
+        async with router._slot(candidate.provider):
+            pass
+    assert ("slot", "shared", 10) in coordinator.events
 
 
 @pytest.mark.asyncio

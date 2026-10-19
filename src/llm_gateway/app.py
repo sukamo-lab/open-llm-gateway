@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 import json
 import secrets
 import hashlib
@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import __version__
-from .config import load_config
+from .config import Limit, load_config
 from .metrics import Metrics, NullMetrics
 from .identity import AuthContext, IdentityStore
 from .logging_config import begin_request, bind_tenant, end_request
@@ -54,6 +54,7 @@ class TenantCreate(BaseModel):
     tokens_per_day: int | None = Field(default=None, gt=0)
     cost_per_30_days: float | None = Field(default=None, gt=0)
     organization_id: str | None = Field(default=None, min_length=1, max_length=64)
+    plan_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class NamedIdentityCreate(BaseModel):
@@ -120,6 +121,25 @@ class TenantUpdate(BaseModel):
     tokens_per_day: int | None = Field(default=None, gt=0)
     cost_per_30_days: float | None = Field(default=None, gt=0)
     organization_id: str | None = Field(default=None, min_length=1, max_length=64)
+    plan_id: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class CreditGrantCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    amount_usd: float = Field(gt=0, le=1_000_000_000)
+    source: str = Field(min_length=1, max_length=120)
+    expires_in_days: int | None = Field(default=None, gt=0, le=3650)
+
+
+class BatchItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    custom_id: str = Field(min_length=1, max_length=128)
+    body: dict[str, Any]
+
+
+class BatchCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    requests: list[BatchItem] = Field(min_length=1)
 
 
 class BodyTooLarge(Exception):
@@ -206,6 +226,7 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         or config.features.usage_accounting
     )
     identity_enabled = bool(config.features.managed_keys or config.features.identity_hierarchy)
+    plans = {item.id: item for item in config.finops.plans} if config.features.finops_plans else {}
     shared_store = None
     if config.database.startswith(("postgresql://", "postgres://")) and (quota_enabled or identity_enabled):
         from .postgres import PostgresStore
@@ -218,6 +239,7 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             accounting=bool(config.features.usage_accounting),
             cost_tracking=bool(config.features.cost_tracking),
             rbac_enabled=bool(config.features.rbac),
+            plans=plans,
         )
         quota = shared_store if quota_enabled else NullQuotaStore()
         identities = shared_store if identity_enabled else None
@@ -236,6 +258,7 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                 config.database, config.auth.key_cache_seconds,
                 config.auth.key_cache_max_entries,
                 rbac_enabled=bool(config.features.rbac),
+                plans=plans,
             ) if identity_enabled else None
         )
     metrics = (
@@ -344,6 +367,11 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             json.dumps(routing_material, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
         cache_available = True
+    semantic_cache_store = None
+    if config.features.semantic_cache:
+        from .semantic_cache import MemorySemanticCache
+
+        semantic_cache_store = MemorySemanticCache(config.semantic_cache)
     telemetry = None
     if config.features.tracing:
         try:
@@ -393,6 +421,32 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             if config.database.startswith(("postgresql://", "postgres://"))
             else SQLiteAuditStore(config.database)
         )
+    job_store = None
+    if config.features.async_jobs:
+        from .jobs import PostgresJobStore, SQLiteJobStore
+
+        job_store = (
+            PostgresJobStore(config.database)
+            if config.database.startswith(("postgresql://", "postgres://"))
+            else SQLiteJobStore(config.database)
+        )
+    coordinator = None
+    if config.features.distributed_resilience:
+        from .coordination import PostgresCoordinator
+
+        coordinator = PostgresCoordinator(config.database, config.coordination.lease_seconds)
+
+    async def run_worker(worker, name: str) -> None:
+        while True:
+            try:
+                worked = await worker.run_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error("%s worker iteration failed error_type=%s", name, type(exc).__name__)
+                worked = False
+            if not worked:
+                await asyncio.sleep(config.jobs.poll_interval_seconds)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -415,15 +469,74 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                 )
         if audit_store is not None:
             await audit_store.initialize()
+        if job_store is not None:
+            await job_store.initialize()
+        if coordinator is not None:
+            await coordinator.initialize()
         removed = await quota.cleanup(
             time.time() - config.accounting.retention_days * 86400
         )
         if removed:
             logger.info("Removed %s expired accounting records", removed)
         async with _provider_client(config) as client:
-            app.state.router = GatewayRouter(config, quota, client, metrics, telemetry)
+            app.state.router = GatewayRouter(config, quota, client, metrics, telemetry, coordinator)
             app.state.active_config = config
-            yield
+            worker_tasks = []
+            if config.features.batch_api:
+                from .jobs import JobWorker, SignedWebhookNotifier, WebhookDeliveryWorker
+
+                notifier = None
+                if config.jobs.webhook_url:
+                    notifier = SignedWebhookNotifier(
+                        config.jobs.webhook_url, config.jobs.webhook_secret() or "", client,
+                        config.jobs.webhook_attempts, config.jobs.webhook_timeout_seconds,
+                    )
+
+                async def handle_chat_batch(job: dict[str, object]) -> dict[str, object]:
+                    payload = job["payload"]
+                    limits = tuple(
+                        Limit.model_validate(item) for item in payload.get("tenant_limits", [])
+                    )
+                    results = []
+                    for item in payload["requests"]:
+                        try:
+                            body, _provider, _model = await app.state.router.complete_for(
+                                item["body"], str(job["tenant_id"]), limits,
+                            )
+                            results.append({"custom_id": item["custom_id"], "response": body})
+                        except QuotaExceeded:
+                            results.append({
+                                "custom_id": item["custom_id"],
+                                "error": {"code": "quota_exceeded", "message": "quota exceeded"},
+                            })
+                        except NoModelAvailable:
+                            results.append({
+                                "custom_id": item["custom_id"],
+                                "error": {"code": "no_model_available", "message": "no model available"},
+                            })
+                    return {"object": "batch_result", "results": results}
+
+                job_worker = JobWorker(
+                    job_store, {"chat_batch": handle_chat_batch},
+                    lease_seconds=config.jobs.lease_seconds, notifier=notifier,
+                    restrict_to_handlers=True,
+                )
+                worker_tasks.append(asyncio.create_task(run_worker(job_worker, "batch")))
+                if notifier is not None:
+                    delivery_worker = WebhookDeliveryWorker(
+                        job_store, notifier, lease_seconds=config.jobs.lease_seconds,
+                    )
+                    worker_tasks.append(
+                        asyncio.create_task(run_worker(delivery_worker, "job webhook"))
+                    )
+            try:
+                yield
+            finally:
+                for task in worker_tasks:
+                    task.cancel()
+                for task in worker_tasks:
+                    with suppress(asyncio.CancelledError):
+                        await task
         for reload_client in reload_clients:
             await reload_client.aclose()
         close = getattr(shared_store or quota, "close", None)
@@ -433,6 +546,12 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             await idempotency_store.close()
         if cache_store is not None:
             await cache_store.close()
+        if semantic_cache_store is not None:
+            await semantic_cache_store.close()
+        if job_store is not None:
+            await job_store.close()
+        if coordinator is not None:
+            await coordinator.close()
         if oidc_validator is not None:
             await oidc_validator.close()
         if audit_store is not None:
@@ -489,6 +608,21 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         value = request.headers.get("authorization", "")
         return value[7:] if value.lower().startswith("bearer ") else ""
 
+    def enforce_plan_entitlement(request: Request, context: AuthContext) -> None:
+        if not config.features.finops_plans or context.plan_id is None:
+            return
+        entitlement = {
+            "/v1/chat/completions": "chat",
+            "/v1/responses": "responses",
+            "/v1/embeddings": "embeddings",
+            "/v1/moderations": "moderations",
+            "/v1/audio/speech": "audio",
+            "/v1/images/generations": "images",
+            "/v1/batches": "chat",
+        }.get(request.url.path)
+        if entitlement and entitlement not in context.entitlements:
+            raise HTTPException(403, f"plan does not entitle {entitlement}")
+
     async def require_api(request: Request) -> AuthContext:
         existing = getattr(request.state, "auth_context", None)
         if existing is not None:
@@ -507,6 +641,7 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                 bind_tenant(context.tenant_id)
             if telemetry is not None:
                 telemetry.set_tenant(context.tenant_id)
+            enforce_plan_entitlement(request, context)
             return context
         token = bearer(request)
         for key in config.auth.api_keys():
@@ -522,6 +657,7 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                     bind_tenant(context.tenant_id)
                 if telemetry is not None:
                     telemetry.set_tenant(context.tenant_id)
+                enforce_plan_entitlement(request, context)
                 return context
         if config.features.managed_keys and identities is not None and token:
             context = await identities.authenticate(token)
@@ -537,6 +673,7 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                     bind_tenant(context.tenant_id)
                 if telemetry is not None:
                     telemetry.set_tenant(context.tenant_id)
+                enforce_plan_entitlement(request, context)
                 return context
         if config.features.oidc and oidc_validator is not None and identities is not None and token:
             try:
@@ -556,6 +693,7 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                     bind_tenant(context.tenant_id)
                 if telemetry is not None:
                     telemetry.set_tenant(context.tenant_id)
+                enforce_plan_entitlement(request, context)
                 return context
         raise HTTPException(401, "invalid gateway API key", headers={"WWW-Authenticate": "Bearer"})
 
@@ -740,9 +878,80 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         require_admin(request)
         return await quota.consumer_snapshot()
 
+    @app.get("/admin/usage/export")
+    async def usage_export(
+        request: Request, after: float = 0, after_id: str = "", limit: int = 1000,
+    ) -> dict[str, object]:
+        require_admin(request)
+        if after < 0 or limit < 1 or limit > 10_000 or len(after_id) > 255:
+            raise HTTPException(400, "invalid export cursor or limit")
+        events = await quota.usage_export(after, after_id, limit)
+        encoded = json.dumps(events, sort_keys=True, separators=(",", ":"), default=str).encode()
+        last = events[-1] if events else None
+        return {
+            "schema_version": 1, "events": events,
+            "sha256": hashlib.sha256(encoded).hexdigest(),
+            "next": {
+                "after": last["created_at"] if last else after,
+                "after_id": last["request_id"] if last else after_id,
+            },
+        }
+
+    @app.get("/admin/usage/reconcile")
+    async def usage_reconcile(request: Request) -> dict[str, object]:
+        require_admin(request)
+        events = await quota.usage_export(0, "", 10_000)
+        return {
+            "schema_version": 1,
+            "complete": len(events) < 10_000,
+            "event_count": len(events),
+            "requests": sum(int(item["requests"]) for item in events),
+            "tokens": sum(int(item["tokens"]) for item in events),
+            "cost_usd": round(sum(float(item["cost_usd"]) for item in events), 8),
+        }
+
+    @app.post("/admin/usage/export-deliver")
+    async def deliver_usage_export(request: Request) -> dict[str, object]:
+        require_admin(request)
+        after, after_id = await quota.export_checkpoint(config.finops.export_sink_id)
+        events = await quota.usage_export(after, after_id, config.finops.export_batch_size)
+        if not events:
+            return {"exported": 0, "checkpoint": {"after": after, "after_id": after_id}}
+        encoded_events = json.dumps(
+            events, sort_keys=True, separators=(",", ":"), default=str,
+        ).encode()
+        page_sha256 = hashlib.sha256(encoded_events).hexdigest()
+        payload = json.dumps({
+            "schema_version": 1, "page_sha256": page_sha256, "events": events,
+        }, sort_keys=True, separators=(",", ":"), default=str).encode()
+        headers = {"Content-Type": "application/json", "Idempotency-Key": page_sha256}
+        if token := config.finops.export_token():
+            headers["Authorization"] = f"Bearer {token}"
+        try:
+            async with httpx.AsyncClient(follow_redirects=False) as export_client:
+                response = await export_client.post(
+                    config.finops.export_url, content=payload, headers=headers,
+                    timeout=config.finops.export_timeout_seconds,
+                )
+        except httpx.HTTPError as exc:
+            raise HTTPException(502, "usage export delivery failed") from exc
+        if not 200 <= response.status_code < 300:
+            raise HTTPException(502, "usage export sink rejected page")
+        last = events[-1]
+        await quota.save_export_checkpoint(
+            config.finops.export_sink_id, float(last["created_at"]),
+            str(last["request_id"]), page_sha256,
+        )
+        return {
+            "exported": len(events), "page_sha256": page_sha256,
+            "checkpoint": {"after": last["created_at"], "after_id": last["request_id"]},
+        }
+
     @app.post("/admin/tenants", status_code=201)
     async def create_tenant(request: Request, tenant: TenantCreate) -> dict[str, object]:
         require_admin(request)
+        if tenant.plan_id is not None and tenant.plan_id not in plans:
+            raise HTTPException(400, "unknown plan_id")
         try:
             created = await identities.create_tenant(**tenant.model_dump())
             await record_admin_event(
@@ -762,9 +971,142 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         require_admin(request)
         return await identities.list_tenants()
 
+    @app.get("/admin/plans")
+    async def list_plans(request: Request) -> list[dict[str, object]]:
+        require_admin(request)
+        return [item.model_dump(mode="json") for item in config.finops.plans]
+
+    @app.get("/v1/jobs/{job_id}")
+    async def get_job(request: Request, job_id: str) -> dict[str, object]:
+        context = await require_api(request)
+        job = await job_store.get(context.tenant_id, job_id)
+        if job is None:
+            raise HTTPException(404, "job not found")
+        return job
+
+    @app.delete("/v1/jobs/{job_id}")
+    async def cancel_job(request: Request, job_id: str) -> dict[str, object]:
+        context = await require_api(request)
+        job = await job_store.cancel(context.tenant_id, job_id)
+        if job is None:
+            raise HTTPException(404, "job not found")
+        return job
+
+    @app.post("/v1/batches", status_code=202)
+    async def create_batch(request: Request, batch: BatchCreate) -> dict[str, object]:
+        context = await require_api(request)
+        if len(batch.requests) > config.batch.max_requests:
+            raise HTTPException(400, "batch exceeds configured request limit")
+        custom_ids = [item.custom_id for item in batch.requests]
+        if len(custom_ids) != len(set(custom_ids)):
+            raise HTTPException(400, "batch custom_id values must be unique")
+        items = []
+        for item in batch.requests:
+            if item.body.get("stream"):
+                raise HTTPException(400, "streaming requests are not supported in batches")
+            if not isinstance(item.body.get("messages"), list):
+                raise HTTPException(400, "each batch request requires a messages array")
+            items.append(item.model_dump(mode="json"))
+        encoded = json.dumps(items, ensure_ascii=False, separators=(",", ":")).encode()
+        if len(encoded) > config.batch.max_payload_bytes:
+            raise HTTPException(413, "batch payload exceeds configured byte limit")
+        payload = {
+            "requests": items,
+            "tenant_limits": [item.model_dump(mode="json") for item in context.limits],
+        }
+        job = await job_store.create(context.tenant_id, "chat_batch", payload)
+        return {**job, "object": "batch"}
+
+    @app.get("/v1/batches/{job_id}")
+    async def get_batch(request: Request, job_id: str) -> dict[str, object]:
+        context = await require_api(request)
+        job = await job_store.get(context.tenant_id, job_id)
+        if job is None or job["kind"] != "chat_batch":
+            raise HTTPException(404, "batch not found")
+        return {**job, "object": "batch"}
+
+    @app.delete("/v1/batches/{job_id}")
+    async def cancel_batch(request: Request, job_id: str) -> dict[str, object]:
+        context = await require_api(request)
+        existing = await job_store.get(context.tenant_id, job_id)
+        if existing is None or existing["kind"] != "chat_batch":
+            raise HTTPException(404, "batch not found")
+        job = await job_store.cancel(context.tenant_id, job_id)
+        return {**job, "object": "batch"}
+
+    @app.get("/admin/tenants/{tenant_id}/budget")
+    async def tenant_budget(request: Request, tenant_id: str) -> dict[str, object]:
+        require_admin(request)
+        tenant = next((item for item in await identities.list_tenants() if item["id"] == tenant_id), None)
+        if tenant is None:
+            raise HTTPException(404, "tenant not found")
+        plan = plans.get(tenant.get("plan_id"))
+        if plan is None:
+            raise HTTPException(409, "tenant has no active configured plan")
+        usage = next(
+            (item for item in await quota.consumer_snapshot() if item["tenant_id"] == tenant_id),
+            {"requests": 0, "tokens": 0, "cost_usd": 0},
+        )
+        cost = float(usage["cost_usd"] or 0)
+        now = time.time()
+        credit_grants = await identities.list_credits(tenant_id)
+        active_grants = [
+            item for item in credit_grants
+            if item["expires_at"] is None or float(item["expires_at"]) > now
+        ]
+        purchased_credit = sum(float(item["amount_usd"]) for item in active_grants)
+        available_credit = plan.included_credit_usd + purchased_credit
+        budget = plan.cost_per_30_days
+        percent = (cost / budget * 100) if budget else None
+        return {
+            "tenant_id": tenant_id, "plan_id": plan.id,
+            "pricing_version": plan.pricing_version,
+            "usage_30_day_cost_usd": round(cost, 8),
+            "included_credit_usd": plan.included_credit_usd,
+            "active_purchased_credit_usd": round(purchased_credit, 8),
+            "remaining_credit_usd": round(max(available_credit - cost, 0), 8),
+            "active_credit_grants": len(active_grants),
+            "budget_usd": budget,
+            "budget_used_percent": round(percent, 4) if percent is not None else None,
+            "triggered_alert_percentages": [
+                threshold for threshold in plan.budget_alert_percentages
+                if percent is not None and percent >= threshold
+            ],
+        }
+
+    @app.get("/admin/tenants/{tenant_id}/credits")
+    async def list_tenant_credits(request: Request, tenant_id: str) -> list[dict[str, object]]:
+        require_admin(request)
+        if not any(item["id"] == tenant_id for item in await identities.list_tenants()):
+            raise HTTPException(404, "tenant not found")
+        return await identities.list_credits(tenant_id)
+
+    @app.post("/admin/tenants/{tenant_id}/credits", status_code=201)
+    async def grant_tenant_credit(
+        request: Request, tenant_id: str, grant: CreditGrantCreate,
+    ) -> dict[str, object]:
+        require_admin(request)
+        expires_at = (
+            time.time() + grant.expires_in_days * 86400 if grant.expires_in_days else None
+        )
+        try:
+            created = await identities.grant_credit(
+                tenant_id, grant.amount_usd, grant.source, expires_at,
+            )
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        await record_admin_event(
+            request, "tenant.credit_granted", tenant_id, metadata={
+                "grant_id": str(created["id"]), "source": grant.source,
+            },
+        )
+        return created
+
     @app.patch("/admin/tenants/{tenant_id}")
     async def update_tenant(request: Request, tenant_id: str, update: TenantUpdate) -> dict[str, object]:
         require_admin(request)
+        if update.plan_id is not None and update.plan_id not in plans:
+            raise HTTPException(400, "unknown plan_id")
         try:
             tenant = await identities.update_tenant(tenant_id, update.model_dump(exclude_unset=True))
         except KeyError as exc:
@@ -1077,7 +1419,7 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                     raise HTTPException(409, "configuration reload generation limit reached; restart required")
                 client = _provider_client(candidate)
                 try:
-                    router = GatewayRouter(candidate, quota, client, metrics, telemetry)
+                    router = GatewayRouter(candidate, quota, client, metrics, telemetry, coordinator)
                 except Exception:
                     await client.aclose()
                     raise
@@ -1358,6 +1700,23 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
                         "Idempotency-Stored": str(stored).lower(),
                     })
                 return JSONResponse(content=cached.response, headers=headers)
+        semantic_allowed = semantic_cache_store is not None
+        if semantic_allowed:
+            semantic_cached = await semantic_cache_store.get(context.tenant_id, payload)
+            if semantic_cached is not None:
+                headers = {"X-Semantic-Cache": "HIT"}
+                if owner_token and idempotency_digest:
+                    encoded_semantic = json.dumps(
+                        semantic_cached, ensure_ascii=False, separators=(",", ":")
+                    )
+                    stored = await idempotency_store.complete(
+                        context.tenant_id, idempotency_digest, owner_token, encoded_semantic
+                    )
+                    headers.update({
+                        "Idempotent-Replayed": "false",
+                        "Idempotency-Stored": str(stored).lower(),
+                    })
+                return JSONResponse(content=semantic_cached, headers=headers)
         try:
             body, provider, upstream_model = await router.complete_for(
                 payload, context.tenant_id, tenant_limits, require_injection_safe
@@ -1463,6 +1822,13 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         }
         encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
         response_headers = {}
+        if semantic_allowed and len(encoded.encode("utf-8")) <= config.cache.max_response_bytes:
+            semantic_result = {
+                **result,
+                "gateway": {**result["gateway"], "rate_limits": {}},
+            }
+            await semantic_cache_store.put(context.tenant_id, payload, semantic_result)
+            response_headers["X-Semantic-Cache"] = "MISS"
         if cache_store is not None:
             if cache_allowed:
                 await metrics.cache(config.cache.backend, "miss")
@@ -1759,6 +2125,16 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             disabled_paths.update({"/admin/usage", "/admin/usage/tenants"})
         if not config.features.managed_keys or not config.features.tenant_quotas:
             disabled_paths.add("/admin/usage/tenants")
+        if not config.features.finops_plans:
+            disabled_paths.update({
+                "/admin/plans", "/admin/tenants/{tenant_id}/budget",
+                "/admin/tenants/{tenant_id}/credits",
+            })
+        if not config.features.finops_export:
+            disabled_paths.update({
+                "/admin/usage/export", "/admin/usage/reconcile",
+                "/admin/usage/export-deliver",
+            })
     if not config.features.metrics:
         disabled_paths.add("/metrics")
     if not config.features.responses_api:
@@ -1771,6 +2147,10 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
         disabled_paths.add("/v1/audio/speech")
     if not config.features.images_api:
         disabled_paths.add("/v1/images/generations")
+    if not config.features.async_jobs:
+        disabled_paths.add("/v1/jobs/{job_id}")
+    if not config.features.batch_api:
+        disabled_paths.update({"/v1/batches", "/v1/batches/{job_id}"})
     if not config.features.model_discovery:
         disabled_paths.add("/admin/model-discovery")
     if not config.features.audit_ledger:

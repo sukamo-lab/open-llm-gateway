@@ -15,7 +15,13 @@
 - `POST /admin/model-discovery`: optional read-only upstream catalog drift report.
 - `GET /admin/usage`: persistent request/token totals.
 - `GET /admin/usage/tenants`: tenant-attributed requests, tokens, and spend.
+- `GET /admin/usage/export`: optional cursor-paginated completed usage with a canonical page checksum.
+- `GET /admin/usage/reconcile`: optional bounded accounting totals for reconciliation.
+- `POST /admin/usage/export-deliver`: checkpointed at-least-once delivery to the configured HTTPS sink.
+- `GET /v1/jobs/{job_id}` and `DELETE /v1/jobs/{job_id}`: optional tenant-isolated durable job status and cancellation.
 - `/admin/tenants` and `/admin/keys/*`: tenant and consumer-key lifecycle.
+- `GET /admin/plans`: optional configured versioned plan catalog.
+- `GET /admin/tenants/{tenant_id}/budget`: usage-backed credit and budget-threshold status.
 - `GET /metrics`: Prometheus text format.
 - `/docs`: interactive API documentation when enabled.
 
@@ -39,11 +45,19 @@ When configuration reload is enabled, validate candidate files with `llm-gateway
 
 `llm-gateway --init --init-mode single` creates the no-database minimal profile. `--init-mode multi` creates secured consumer/admin credentials and enables the managed feature set.
 
+For versioned plans, treat each `pricing_version` as immutable configuration under change control. Assign only plan IDs returned by `GET /admin/plans`; unknown IDs are rejected by tenant administration. Plan quota ceilings compose with tenant overrides, and an existing tenant assignment survives restart in SQLite or PostgreSQL. Back up and migrate the identity component before enabling this feature. Poll the budget endpoint to deliver alerts through your existing automation; its triggered-threshold list is deterministic and can be deduplicated by tenant, pricing version, and threshold.
+
+For usage export, persist both fields from the returned `next` cursor and verify each page's SHA-256 over its sorted compact JSON event array. Pages contain only completed records and are ordered by creation time plus request ID. Reconciliation is intentionally bounded at 10,000 events; `complete: false` means the operator must reconcile exported pages externally rather than treating the totals as global.
+
+The delivery endpoint sends one configured bounded page with its checksum as `Idempotency-Key`. The sink must deduplicate on that key. A timeout, non-2xx response, or process interruption before checkpointing replays the same page; the checkpoint advances only after a 2xx response. Invoke until `exported` is zero.
+
 `llm-gateway --migration-status --output json` reports component schema versions without changing them. `llm-gateway --migrate` applies pending migrations and is suitable for a deployment pre-start job. See [Database migrations](DATABASE_MIGRATIONS.md).
 
 When idempotency is enabled, monitor database growth and choose a TTL appropriate for client retry windows. PostgreSQL coordinates claims across replicas. SQLite is suitable only for a single gateway process. Treat HTTP 409 with `Retry-After` as an in-progress duplicate and retry later using the same key and unchanged body.
 
 For exact caching, use the memory backend only for a single process. Use PostgreSQL or Redis for multiple replicas, monitor hit ratio and retained bytes at the backend, and increment `cache.namespace` for an immediate logical invalidation. Provider/model configuration changes invalidate keys automatically. Redis must enforce its own authentication, TLS, network policy, memory limit, and eviction policy.
+
+For semantic caching, begin with a high similarity threshold and a new `embedding_version` for every vectorizer change. The current memory backend is replica-local; do not expect cross-worker hits. Treat cached prompt and response material as customer content, keep tenant partitioning enabled, and prefer PII redaction instead of `allow_sensitive_content`.
 
 For tracing, send OTLP/HTTP to a local or regional OpenTelemetry Collector rather than directly coupling the gateway to a monitoring vendor. Protect collector ingestion with TLS and authentication, bound exporter queues, and select a sampling ratio appropriate for traffic. Export occurs in batches off the request path; shutdown attempts to flush queued spans. Keep tenant IDs disabled unless the monitoring destination is approved for that metadata.
 
@@ -77,6 +91,14 @@ Exported records can be independently verified by starting with 64 zeroes as `pr
 
 Run `python scripts/verify_audit_export.py export.json` outside the gateway process to verify a complete JSON batch, `{ "events": [...] }` payload, or JSON Lines file. For a later segment, pass the previously anchored `--checkpoint-sequence` and `--checkpoint-hash`.
 
+## Plan credits and budgets
+
+Credit grants are append-only financial records. Grant them only through `POST /admin/tenants/{tenant_id}/credits`, use a stable non-secret source reference, and set `expires_in_days` for time-limited promotions. Poll `GET /admin/tenants/{tenant_id}/budget` for the active purchased total, remaining combined credit, spend percentage, and crossed thresholds. Database triggers reject edits and deletes; investigate an incorrect grant through the audit trail rather than modifying it in place.
+
+## Durable batches and webhooks
+
+Batch prompts and results are sensitive durable records. Enable payload persistence only on an encrypted, access-controlled database with a documented retention process. Monitor queued/running job age and webhook outbox attempts. Worker and notifier leases are safe to reclaim after their configured expiry; do not manually rewrite running ownership. Completion delivery is at-least-once, so sinks must deduplicate the job ID from `Idempotency-Key`, verify the timestamped HMAC signature, and reject stale timestamps according to local policy.
+
 ## Residency enforcement
 
 Treat configured provider regions and residency labels as operator assertions unless your provider contract and deployment process independently attest them. With `residency_enforcement` enabled, readiness/configuration validation requires a named policy with required residency labels and denied fallback. Requests cannot select a different policy, and an operation or model outside the enforced policy is rejected rather than routed without residency constraints. During an outage, add only a provider that satisfies the same policy; do not change fallback to `default` as an availability workaround.
@@ -86,6 +108,8 @@ An unauthenticated gateway is permitted only on a localhost bind. Readiness fail
 ## Circuit breaker
 
 Transport errors, rate limits, invalid credentials, removed models, and malformed upstream responses count as failures. At the configured threshold, that provider is skipped during its cooldown. A later successful request closes the circuit. Local configured quotas skip a provider without counting as an upstream failure.
+
+With `distributed_resilience` enabled, PostgreSQL becomes the coordination authority for circuits and concurrency. Live requests renew their slot lease every third of `coordination.lease_seconds`; choose a value long enough to tolerate brief database interruptions without premature expiry. Worker or process termination needs no manual cleanup because renewal stops and expired leases are removed during subsequent acquisition. Monitor database latency because coordination adds shared-store operations to enabled request attempts.
 
 ## Retry and streaming recovery
 
@@ -111,3 +135,7 @@ The tool reports failures, throughput, mean, p50, p95, and p99. Run it from the 
 ## Release verification
 
 Cross-platform unit, package, PostgreSQL integration, and container build checks are defined in `.github/workflows/ci.yml`. See [Development and verification](DEVELOPMENT.md) for equivalent local commands. Production releases should be made only from a revision where every required job passes.
+
+## Backup and disaster recovery
+
+Use `scripts/sqlite_backup.py` for online SQLite backup plus manifest verification and guarded restore. PostgreSQL deployments must use encrypted platform backups/PITR and execute the multi-replica recovery drill in [Disaster recovery](DISASTER_RECOVERY.md). Record achieved RPO/RTO rather than treating example targets as guarantees.

@@ -50,6 +50,58 @@ python -m pytest -m integration -q
 
 Never point this variable at a production or shared customer database. Integration tests create schema objects and test records. CI supplies an isolated PostgreSQL service automatically.
 
+An existing PostgreSQL server used by other applications is acceptable only when LLM Gateway receives its own empty database and restricted login. Connect to the server's administrative database as a PostgreSQL administrator:
+
+```powershell
+psql -h POSTGRES_HOST -p 5432 -U postgres -d postgres
+```
+
+Then run the following in `psql`. `\password` prompts securely instead of storing the new password in shell or SQL history:
+
+```sql
+CREATE ROLE llm_gateway_test
+  LOGIN
+  NOSUPERUSER
+  NOCREATEDB
+  NOCREATEROLE
+  NOINHERIT;
+\password llm_gateway_test
+
+CREATE DATABASE llm_gateway_test
+  OWNER llm_gateway_test
+  ENCODING 'UTF8'
+  TEMPLATE template0;
+
+REVOKE ALL ON DATABASE llm_gateway_test FROM PUBLIC;
+GRANT CONNECT, TEMPORARY ON DATABASE llm_gateway_test TO llm_gateway_test;
+ALTER DATABASE llm_gateway_test CONNECTION LIMIT 50;
+```
+
+Verify the restricted login against the new database:
+
+```powershell
+psql -h POSTGRES_HOST -p 5432 -U llm_gateway_test -d llm_gateway_test `
+  -c "SELECT current_database(), current_user;"
+```
+
+Set the DSN only in the shell running the tests. URL-encode reserved characters in the password, or choose a strong URL-safe generated password:
+
+```powershell
+$env:LLM_GATEWAY_TEST_POSTGRES_DSN = "postgresql://llm_gateway_test:URL_ENCODED_PASSWORD@POSTGRES_HOST:5432/llm_gateway_test"
+python -m pytest -m integration -q
+```
+
+When the test database is no longer needed, disconnect test clients before removing it. These commands permanently delete only the dedicated database and role:
+
+```sql
+REVOKE CONNECT ON DATABASE llm_gateway_test FROM llm_gateway_test;
+SELECT pg_terminate_backend(pid)
+FROM pg_stat_activity
+WHERE datname = 'llm_gateway_test' AND pid <> pg_backend_pid();
+DROP DATABASE llm_gateway_test;
+DROP ROLE llm_gateway_test;
+```
+
 ## Continuous integration
 
 GitHub Actions runs:

@@ -48,3 +48,7 @@ The supplied image runs as UID 10001, includes a health check, and writes only t
 ## Reverse proxy
 
 Terminate HTTPS at your ingress and preserve `Authorization`, `X-Request-ID`, and streaming responses. Disable response buffering for `/v1/chat/completions` when using SSE. Apply request body limits appropriate for vision inputs and set an upstream timeout longer than the largest configured provider timeout.
+
+## Kubernetes and Helm
+
+The hardened chart under `deploy/helm/llm-gateway` supports multi-replica deployments, pre-upgrade migrations, health probes, HPA, disruption budgets, restricted pod security, network policy, and externally managed secrets. Review its README and render every environment overlay with `helm template` before deployment. PostgreSQL is required for shared managed state; enable distributed resilience when provider circuit and concurrency state must be coordinated across replicas.
