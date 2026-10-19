@@ -63,7 +63,11 @@ class IdentityStore:
 
     @staticmethod
     def _hash(token: str) -> str:
-        return hashlib.sha256(token.encode("utf-8")).hexdigest()
+        # Consumer keys contain 256 bits of generated entropy. This is an indexed
+        # token fingerprint, not a human
+        # password verifier; a password KDF would add latency without improving
+        # resistance to guessing and would invalidate existing stored hashes.
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()  # lgtm[py/weak-sensitive-data-hashing]
 
     def _limits(self, row: sqlite3.Row) -> tuple[Limit, ...]:
         result = []
