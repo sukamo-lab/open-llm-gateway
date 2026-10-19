@@ -1,4 +1,4 @@
 # Direct release-tool versions are pinned so the artifact-producing toolchain changes only by review.
-build==1.2.2.post1
-hatchling==1.27.0
-PyYAML==6.0.2
+build==1.6.1
+hatchling==1.32.4
+PyYAML==6.0.3
